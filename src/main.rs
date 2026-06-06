@@ -1,24 +1,30 @@
 //! ShellMounter — Open-source Termius alternative
 //!
-//! Stack: GPUI (UI) + russh (SSH) + alacritty_terminal (terminal) + AES-256 (vault)
+//! Stack: russh (SSH) + alacritty_terminal (terminal) + AES-256 (vault)
+//! The GUI (GPUI) is optional — the CLI mode works on any platform.
 //!
 //! Usage:
-//!   shellmounter              Launch GUI
+//!   shellmounter              Launch GUI (requires display)
 //!   shellmounter --version    Print version
 //!   shellmounter --help       Show help
+//!   shellmounter --cli        CLI mode (no GUI needed)
+//!   shellmounter import       Import hosts from ~/.ssh/config
 
 mod db;
 mod platform;
 mod ssh;
+#[cfg(feature = "alacritty_terminal")]
 mod terminal;
-mod ui;
 mod update;
 mod vault;
+
+// UI is optional — requires GPUI (not available on all platforms)
+#[cfg(feature = "gui")]
+mod ui;
 
 use std::path::PathBuf;
 
 fn main() {
-    // Parse CLI args before initializing tracing
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 {
@@ -31,20 +37,80 @@ fn main() {
                 print_help();
                 return;
             }
-            _ => {
-                eprintln!("Unknown option: {}\n", args[1]);
-                print_help();
-                std::process::exit(1);
+            "--cli" => {
+                run_cli();
+                return;
             }
+            "import" => {
+                import_hosts();
+                return;
+            }
+            _ => {}
         }
     }
 
-    // Initialize tracing for diagnostics (non-blocking, writes to file)
-    let log_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("shellmounter")
-        .join("logs");
+    // Try GUI, fall back to CLI
+    #[cfg(feature = "gui")]
+    {
+        init_logging();
+        let data_dir = get_data_dir();
+        ui::app::run(data_dir);
+        return;
+    }
 
+    #[cfg(not(feature = "gui"))]
+    {
+        println!("GUI not available on this platform. Use --cli or --help.");
+        println!("Build with: cargo build --features gui");
+    }
+}
+
+fn run_cli() {
+    init_logging();
+    let data_dir = get_data_dir();
+
+    let hosts = db::hosts::HostDb::open(&data_dir)
+        .and_then(|db| db.list_hosts(None))
+        .unwrap_or_default();
+
+    println!("ShellMounter CLI");
+    println!("Hosts: {}", hosts.len());
+    for host in &hosts {
+        println!("  {} — {}@{}:{}", host.label, host.username, host.hostname, host.port);
+    }
+}
+
+fn import_hosts() {
+    init_logging();
+    let data_dir = get_data_dir();
+
+    let ssh_config = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".ssh")
+        .join("config");
+
+    if !ssh_config.exists() {
+        eprintln!("No ~/.ssh/config found");
+        return;
+    }
+
+    match ssh::import_config::parse_ssh_config(&ssh_config) {
+        Ok(hosts) => {
+            println!("Parsed {} hosts from {}", hosts.len(), ssh_config.display());
+            let db = db::hosts::HostDb::open(&data_dir).expect("open DB");
+            for host in &hosts {
+                match db.upsert_host(host) {
+                    Ok(()) => println!("  ✓ {}", host.label),
+                    Err(e) => eprintln!("  ✗ {}: {}", host.label, e),
+                }
+            }
+        }
+        Err(e) => eprintln!("Failed to parse: {}", e),
+    }
+}
+
+fn init_logging() {
+    let log_dir = get_data_dir().join("logs");
     std::fs::create_dir_all(&log_dir).ok();
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "shellmounter.log");
@@ -54,37 +120,18 @@ fn main() {
         .with_writer(non_blocking)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("shellmounter=info".parse().unwrap())
-                .add_directive("russh=warn".parse().unwrap()),
+                .add_directive("shellmounter=info".parse().unwrap()),
         )
         .with_target(false)
         .init();
 
-    log::info!(
-        "ShellMounter v{} starting — {}",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS
-    );
+    log::info!("ShellMounter v{} — CLI mode", env!("CARGO_PKG_VERSION"));
+}
 
-    // Check for updates via Cloudflare R2 (non-blocking background thread)
-    std::thread::spawn(|| {
-        if let Err(e) = update::check() {
-            log::debug!("Update check: {e}");
-        }
-    });
-
-    // Initialize data directory
-    let data_dir = dirs::data_dir()
+fn get_data_dir() -> PathBuf {
+    dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("shellmounter");
-
-    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
-
-    // Launch GPUI application
-    ui::app::run(data_dir);
-
-    // Flush logs before exit
-    log::logger().flush();
+        .join("shellmounter")
 }
 
 fn print_help() {
@@ -92,29 +139,25 @@ fn print_help() {
         "ShellMounter v{}
 
 USAGE:
-    shellmounter              Launch the graphical interface
-    shellmounter --version    Print version and exit
-    shellmounter --help       Show this help message
+    shellmounter              Launch GUI (requires --features gui)
+    shellmounter --cli        CLI mode
+    shellmounter import       Import hosts from ~/.ssh/config
+    shellmounter --version    Print version
+    shellmounter --help       Show this help
 
 DATA:
-    All data is stored in:  {}/shellmounter/
+    {}  /shellmounter/
     ├── hosts.db             SSH host configurations
     ├── vault/               Encrypted keys and passwords
-    ├── themes/              Terminal color themes
     └── logs/                Application logs
 
-ENVIRONMENT:
-    SSH_TEST_HOST            SSH host for integration tests
-    SSH_TEST_PORT            SSH port (default: 22)
-    SSH_TEST_USER            SSH username (default: root)
-    SSH_TEST_KEY             Path to SSH private key
-    RUST_LOG                 Log level (trace, debug, info, warn, error)
+BUILD:
+    cargo build --release              CLI only (works everywhere)
+    cargo build --release --features gui  With GPUI desktop app
 
-REPOSITORY:
+REPO:
     https://github.com/CoderBotOne/shellmounter",
         env!("CARGO_PKG_VERSION"),
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-            .display()
+        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).display()
     );
 }

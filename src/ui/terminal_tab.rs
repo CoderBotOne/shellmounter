@@ -1,3 +1,4 @@
+use gpui::*;
 //! Terminal tab component — bridges SSH session + alacritty_terminal + GPUI.
 //!
 //! Each tab holds an SSH session and renders its terminal output.

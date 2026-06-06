@@ -4,7 +4,6 @@
 //! All data persisted to SQLite + encrypted vault.
 
 use gpui::*;
-use gpui_component::{button::Button, input::TextInput};
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -245,7 +244,7 @@ fn render_vault_dialog(state: &AppState, cx: &mut Context<AppState>) -> impl Int
                 .child(div().flex().gap_2()
                     .child(div().flex_1().child(Label::new("New vault").size(px(11.)).color(rgb(0x4a4f62))))
                     .child(
-                        Button::new(cx, "Unlock").on_click(cx.listener(|this, _: &ClickEvent, cx| { this.unlock_vault(cx); }))
+                        div().px_2().py_1().bg(rgb(0x1e2538)).rounded_md().cursor_pointer().child(Label::new("Unlock".to_string()).size(px(12.)).color(rgb(0xe1e5ee))).on_click(cx.listener(|this, _: &ClickEvent, cx| { this.unlock_vault(cx); }))
                     )
                 ),
         )
@@ -259,8 +258,8 @@ fn render_sidebar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElem
             div().h(px(40.)).px_3().flex().items_center().justify_between().border_b_1().border_color(rgb(0x1e2538))
                 .child(Label::new("Hosts").size(px(13.)).weight(FontWeight::BOLD).color(rgb(0xe1e5ee)))
                 .child(div().flex().gap_1()
-                    .child(Button::new(cx, "+ Host").on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_host_editor = true; cx.notify(); })))
-                    .child(Button::new(cx, "🔑").on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_key_gen = true; cx.notify(); })))
+                    .child(div().px_2().py_1().bg(rgb(0x1e2538)).rounded_md().cursor_pointer().child(Label::new("+ Host".to_string()).size(px(12.)).color(rgb(0xe1e5ee))).on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_host_editor = true; cx.notify(); })))
+                    .child(div().px_2().py_1().bg(rgb(0x1e2538)).rounded_md().cursor_pointer().child(Label::new("🔑".to_string()).size(px(12.)).color(rgb(0xe1e5ee))).on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_key_gen = true; cx.notify(); })))
                 ),
         )
         .child(
@@ -308,8 +307,8 @@ fn render_sidebar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElem
                             .child(form_field("Port", "22"))
                             .child(
                                 div().flex().gap_2().justify_end().mt_3()
-                                    .child(Button::new(cx, "Cancel").on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_host_editor = false; cx.notify(); })))
-                                    .child(Button::new(cx, "Save").on_click(cx.listener(|this, _: &ClickEvent, cx| { this.save_host(cx); })))
+                                    .child(div().px_2().py_1().bg(rgb(0x1e2538)).rounded_md().cursor_pointer().child(Label::new("Cancel".to_string()).size(px(12.)).color(rgb(0xe1e5ee))).on_click(cx.listener(|this, _: &ClickEvent, cx| { this.show_host_editor = false; cx.notify(); })))
+                                    .child(div().px_2().py_1().bg(rgb(0x1e2538)).rounded_md().cursor_pointer().child(Label::new("Save".to_string()).size(px(12.)).color(rgb(0xe1e5ee))).on_click(cx.listener(|this, _: &ClickEvent, cx| { this.save_host(cx); })))
                             )
                     )
             )

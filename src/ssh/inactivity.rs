@@ -82,6 +82,7 @@ impl InactivityMonitor {
 
 /// Send a desktop notification (cross-platform).
 #[cfg(not(test))]
+#[cfg(feature = "gui")]
 pub fn send_notification(title: &str, body: &str) {
     let _ = notify_rust::Notification::new()
         .summary(title)
@@ -91,14 +92,15 @@ pub fn send_notification(title: &str, body: &str) {
         .show();
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "gui"))]
+#[cfg(feature = "gui")]
 pub fn send_notification(_title: &str, _body: &str) {
     // No-op in tests
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(not(feature = "gui"))]
 mod tests {
     use super::*;
     use std::thread::sleep;
