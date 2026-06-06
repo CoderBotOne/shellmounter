@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+shellmounter.iml
+.idea/
+.vscode/
+*.swp
+*.swo
