@@ -29,7 +29,7 @@ struct Client {
 }
 
 /// Known hosts store (TOFU — Trust On First Use).
-struct KnownHosts {
+pub(crate) struct KnownHosts {
     /// host:port → fingerprint SHA-256
     fingerprints: HashMap<String, String>,
     /// Path to the known_hosts file
