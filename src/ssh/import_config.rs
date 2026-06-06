@@ -128,7 +128,7 @@ impl HostBuilder {
     fn build(self) -> Host {
         let auth_method = if self.forward_agent {
             AuthMethod::Agent
-        } else if let Some(key_path) = self.identity_file {
+        } else if let Some(_key_path) = self.identity_file {
             AuthMethod::Key {
                 vault_id: format!("imported-{}", sanitize_id(&self.label)),
             }

@@ -8,7 +8,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// A saved command snippet.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,7 +86,7 @@ impl SnippetStore {
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let tags_str: String = row.get(3)?;
+            let tags_str: String = row.get(4)?;
             let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
             Ok(Snippet {
                 id: row.get(0)?,
@@ -95,8 +94,8 @@ impl SnippetStore {
                 command: row.get(2)?,
                 description: row.get(3)?,
                 tags,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?;
 
@@ -118,7 +117,7 @@ impl SnippetStore {
         )?;
 
         let rows = stmt.query_map(params![pattern], |row| {
-            let tags_str: String = row.get(3)?;
+            let tags_str: String = row.get(4)?;
             let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
             Ok(Snippet {
                 id: row.get(0)?,
@@ -126,8 +125,8 @@ impl SnippetStore {
                 command: row.get(2)?,
                 description: row.get(3)?,
                 tags,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })?;
 
@@ -179,6 +178,7 @@ impl SnippetStore {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     #[test]
     fn test_save_and_list() {

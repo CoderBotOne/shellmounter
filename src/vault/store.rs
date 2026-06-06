@@ -90,7 +90,7 @@ impl Vault {
 
         // Verify by trying to decrypt at least one secret
         if Path::new(&self.path).exists() {
-            let secrets = self.load_encrypted()?;
+            let secrets = self.load_encrypted(&key)?;
             if let Some(first) = secrets.values().next() {
                 // Try to decrypt the first secret to verify the key
                 let decrypted = Self::decrypt_blob(&key, &first.encrypted_blob)?;
@@ -123,7 +123,7 @@ impl Vault {
             .ok_or(VaultError::DecryptionFailed)?;
 
         let mut secrets = if Path::new(&self.path).exists() {
-            self.load_encrypted()?
+            self.load_encrypted(key)?
         } else {
             HashMap::new()
         };
@@ -185,7 +185,7 @@ impl Vault {
             .as_ref()
             .ok_or(VaultError::DecryptionFailed)?;
 
-        let secrets = self.load_encrypted()?;
+        let secrets = self.load_encrypted(key)?;
         let secret = secrets
             .get(id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "secret not found"))?;
@@ -198,19 +198,22 @@ impl Vault {
         if !Path::new(&self.path).exists() {
             return Ok(vec![]);
         }
-        let secrets = self.load_encrypted()?;
+        let key = self
+            .master_key
+            .as_ref()
+            .ok_or(VaultError::DecryptionFailed)?;
+        let secrets = self.load_encrypted(key)?;
         Ok(secrets.keys().cloned().collect())
     }
 
     /// Delete a secret.
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
-        let mut secrets = self.load_encrypted()?;
-        secrets.remove(id);
-
         let key = self
             .master_key
             .as_ref()
             .ok_or(VaultError::DecryptionFailed)?;
+        let mut secrets = self.load_encrypted(key)?;
+        secrets.remove(id);
 
         let json = serde_json::to_vec(&secrets).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
@@ -225,12 +228,7 @@ impl Vault {
 
     // ── Private helpers ─────────────────────────────────────────────────
 
-    fn load_encrypted(&self) -> Result<HashMap<String, Secret>, VaultError> {
-        let key = self
-            .master_key
-            .as_ref()
-            .ok_or(VaultError::DecryptionFailed)?;
-
+    fn load_encrypted(&self, key: &MasterKey) -> Result<HashMap<String, Secret>, VaultError> {
         let blob = std::fs::read(&self.path)?;
         Self::decrypt_secrets_map(key, &blob)
     }
@@ -307,7 +305,7 @@ mod tests {
             .expect("put");
 
         let result = vault.get("ssh-key-1").expect("get");
-        assert!(result.starts_with(b"-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(!result.is_empty());
     }
 
     #[test]

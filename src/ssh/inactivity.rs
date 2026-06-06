@@ -102,8 +102,8 @@ pub fn send_notification(_title: &str, _body: &str) {
 
 #[cfg(not(feature = "gui"))]
 mod tests {
-    use super::*;
-    use std::thread::sleep;
+    
+    
 
     #[test]
     fn test_feed_updates_timestamp() {

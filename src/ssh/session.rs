@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use russh::*;
 use russh_keys::load_secret_key;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -84,7 +83,7 @@ impl client::Handler for Client {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh_keys::key::PublicKey,
+        _server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
         // We don't have host/port context here, so we delegate
         // The actual check happens before connect via verify_host_key()
@@ -194,7 +193,7 @@ impl SshSession {
         true
     }
 
-    pub async fn close(mut self) -> Result<()> {
+    pub async fn close(self) -> Result<()> {
         self.channel.eof().await?;
         self.session
             .disconnect(Disconnect::ByApplication, "", "User closed")
@@ -235,7 +234,7 @@ mod tests {
     #[test]
     fn test_known_hosts_persistence() {
         let dir = TempDir::new().unwrap();
-        let key = russh_keys::key::KeyPair::generate_ed25519().unwrap();
+        let key = russh_keys::key::KeyPair::generate_ed25519();
         let pubkey = key.clone_public_key().unwrap();
 
         // Save
