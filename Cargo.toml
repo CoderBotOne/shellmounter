@@ -24,7 +24,7 @@ parking_lot = "0.12.5"
 rand = "0.10.1"
 # HTTP client for R2 updates (rustls = no OpenSSL dependency)
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "gzip", "blocking"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = "0.39"
 russh = "0.61.2"
 russh-keys = "0.49.2"
 russh-sftp = "2.3.0"
