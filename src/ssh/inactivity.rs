@@ -92,15 +92,14 @@ pub fn send_notification(title: &str, body: &str) {
         .show();
 }
 
-#[cfg(not(feature = "gui"))]
-#[cfg(feature = "gui")]
+#[cfg(any(test, not(feature = "gui")))]
 pub fn send_notification(_title: &str, _body: &str) {
-    // No-op in tests
+    // No-op when gui is disabled or during tests
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-#[cfg(not(feature = "gui"))]
+#[cfg(all(test, not(feature = "gui")))]
 mod tests {
     use super::*;
     use std::thread::sleep;
