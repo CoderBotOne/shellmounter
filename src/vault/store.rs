@@ -106,8 +106,12 @@ impl Vault {
         Ok(())
     }
 
-    /// Lock the vault, clearing the master key from memory.
+    /// Lock the vault, zeroizing the master key from memory.
     pub fn lock(&mut self) {
+        if let Some(ref mut key) = self.master_key {
+            use zeroize::Zeroize;
+            key.zeroize();
+        }
         self.master_key = None;
     }
 

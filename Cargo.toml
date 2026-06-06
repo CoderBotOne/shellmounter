@@ -36,6 +36,7 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.2", features = ["v4"] }
+zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 
 [profile.release]
 opt-level = 3
