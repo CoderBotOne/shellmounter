@@ -1417,7 +1417,7 @@ fn render_sftp_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
                                     cx.notify();
                                 }
                             })
-                        })))))
+                        }))))))
             // Right pane — Remote host picker or file list
             .child(v_flex().flex_1().min_w_0()
                 .child(h_flex().h_8().px_2().gap_1().items_center().border_b_1().border_color(cx.theme().border).bg(cx.theme().secondary)
