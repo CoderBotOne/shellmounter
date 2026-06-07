@@ -314,8 +314,6 @@ impl AppState {
                 }
                 AuthMethod::Password { vault_id }
             }
-                AuthMethod::Password { vault_id }
-            }
             "key" => AuthMethod::Key {
                 vault_id: self.host_form.selected_key_id.clone().unwrap_or_default(),
             },
