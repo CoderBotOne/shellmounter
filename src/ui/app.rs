@@ -865,7 +865,7 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
                     this.modal = Some(Modal::HostEditor);
                     cx.notify();
                 }))
-                .child("⚡ Quick Connect")))
+                .child("Quick Connect")))
         .child(div().id("host-scroll").flex_1().overflow_y_scrollbar().p_4()
             .children({
                 let mut items: Vec<AnyElement> = vec![];
@@ -1567,7 +1567,7 @@ fn render_file_row(
         .px_2().py_1().gap_2().items_center().cursor_pointer()
         .hover(|d| d.bg(cx.theme().secondary))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-        .child(div().text_xs().text_color(icon_color).child(if is_dir { "📁" } else { "📄" }))
+        .child(Icon::new(if is_dir { IconName::Folder } else { IconName::File }).small().text_color(icon_color))
         .child(div().flex_1().min_w_0().text_sm().child(name_owned.clone()))
         .child(div().w(px(70.)).text_xs().text_color(cx.theme().muted_foreground).child(size_owned.clone()))
 }
@@ -1712,13 +1712,32 @@ fn toggle(label: &str, active: bool, cx: &mut Context<AppState>,
 }
 
 fn form_input(_label: &str, value: &SharedString, cx: &mut Context<AppState>,
-              _on_change: impl Fn(&mut AppState, String, &mut Context<AppState>) + 'static) -> impl IntoElement {
-    // Editable text input: click to focus, type to edit
-    // Using a simple div that shows the value and captures keyboard input
+              on_change: impl Fn(&mut AppState, String, &mut Context<AppState>) + 'static) -> impl IntoElement {
+    // Editable text input using track_focus + on_key_down
     let val = value.clone();
     let display = if val.is_empty() { " ".to_string() } else { val.to_string() };
+    let focus_handle = cx.focus_handle();
+    let val2 = val.clone();
     div().h_9().px_3().rounded(cx.theme().radius).bg(cx.theme().background)
         .border_1().border_color(cx.theme().border).flex().items_center()
+        .track_focus(&focus_handle)
+        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |_this, _event: &gpui::MouseDownEvent, window, cx| {
+            cx.focus_self(window);
+        }))
+        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
+            let key = &event.keystroke.key;
+            if key == "backspace" {
+                let mut v: String = val2.clone().into();
+                v.pop();
+                on_change(this, v, cx);
+            } else if key == "enter" || key == "return" {
+                // ignore
+            } else if key.len() == 1 && !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
+                let mut v: String = val2.clone().into();
+                v.push_str(key);
+                on_change(this, v, cx);
+            }
+        }))
         .child(div().text_sm().text_color(cx.theme().foreground).child(display))
 }
 
