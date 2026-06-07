@@ -3,7 +3,8 @@ use gpui::*;
 use gpui_component::{h_flex, sidebar::{
     Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader,
     SidebarMenu, SidebarMenuItem, SidebarToggleButton,
-}, v_flex, ActiveTheme, Icon, IconName, Root, Sizable, TitleBar};
+}, v_flex, ActiveTheme, Icon, IconName, Root, Sizable};
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_platform::application;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -292,11 +293,11 @@ impl AppState {
             let hostname = host.hostname.clone();
             let username = host.username.clone();
             let port = host.port;
-            cx.spawn(|mut cx| async move {
+            cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
                 let result = SshSession::connect(
                     &hostname, port, &username, "", &data_dir,
                 ).await;
-                cx.update(|_window, this: &mut AppState, cx| {
+                entity.update(cx, |this, cx| {
                     this.tabs.iter_mut().find(|t| t.id == host_id2).map(|t| t.connected = true);
                     this.status_message = match result {
                         Ok(_) => "Conectado".into(),
@@ -342,23 +343,113 @@ impl AppState {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Render for AppState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let decorations = window.window_decorations();
+        let is_csd = matches!(decorations, Decorations::Client { .. });
+        let win_ctrls = window.window_controls();
+        let is_maximized = window.is_maximized();
+
         let nav = self.nav;
         let collapsed = self.sidebar_collapsed;
         let vok = self.vault_unlocked;
         let ic = collapsed;
 
+        // Colores de botones (Hsla: Copy, capturados por valor en closures)
+        let btn_fg       = cx.theme().foreground;
+        let btn_hover    = cx.theme().secondary_hover;
+        let btn_active   = cx.theme().secondary_active;
+        let close_hover  = cx.theme().danger;
+        let close_active = cx.theme().danger_active;
+        let close_fg     = cx.theme().danger_foreground;
+
         v_flex().size_full().bg(cx.theme().background)
-            .child(TitleBar::new()
-                .child(h_flex().items_center().gap_2()
-                    .child(SidebarToggleButton::new().collapsed(ic)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_collapsed = !this.sidebar_collapsed; cx.notify();
-                        })))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("ShellMounter")))
-                .child(h_flex().items_center().gap_2().text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("{} hosts · v{}", self.hosts.len(), env!("CARGO_PKG_VERSION")))))
+            .overflow_hidden()
+            // Bordes redondeados en ventana flotante, planos al encajar/tiled (estilo Zed, 10px)
+            .map(|this| match decorations {
+                Decorations::Client { tiling } => this
+                    .when(!(tiling.top || tiling.left),    |d| d.rounded_tl(px(10.)))
+                    .when(!(tiling.top || tiling.right),   |d| d.rounded_tr(px(10.)))
+                    .when(!(tiling.bottom || tiling.left), |d| d.rounded_bl(px(10.)))
+                    .when(!(tiling.bottom || tiling.right),|d| d.rounded_br(px(10.))),
+                _ => this,
+            })
+            // ── Titlebar personalizada (estilo Zed): drag + botones CSD circulares ──
+            .child(
+                h_flex()
+                    .id("titlebar")
+                    .w_full().h(px(34.)).flex_shrink_0()
+                    .pl(px(12.))
+                    .border_b_1().border_color(cx.theme().title_bar_border)
+                    .bg(cx.theme().title_bar)
+                    .window_control_area(WindowControlArea::Drag)
+                    // Izquierda: toggle sidebar + nombre
+                    .child(h_flex().items_center().gap_2()
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            window.prevent_default(); cx.stop_propagation();
+                        })
+                        .child(SidebarToggleButton::new().collapsed(ic)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_collapsed = !this.sidebar_collapsed; cx.notify();
+                            })))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("ShellMounter")))
+                    // Centro: hosts / versión
+                    .child(div().flex_1().flex().items_center().justify_center()
+                        .text_xs().text_color(cx.theme().muted_foreground)
+                        .child(format!("{} hosts · v{}", self.hosts.len(), env!("CARGO_PKG_VERSION"))))
+                    // Derecha: botones de ventana circulares (solo CSD)
+                    .child(h_flex()
+                        .id("win-controls")
+                        .items_center().flex_shrink_0().h_full()
+                        .gap_1().pr_3()
+                        .when(is_csd, |this| this
+                            .when(win_ctrls.minimize, |this| this.child(
+                                div().id("btn-min")
+                                    .cursor_pointer().flex_shrink_0()
+                                    .rounded_full().w_5().h_5()
+                                    .flex().items_center().justify_center()
+                                    .text_color(btn_fg)
+                                    .hover(move |s| s.bg(btn_hover))
+                                    .active(move |s| s.bg(btn_active))
+                                    .on_mouse_down(MouseButton::Left, |_, w, cx| {
+                                        w.prevent_default(); cx.stop_propagation();
+                                    })
+                                    .on_click(|_, w, cx| { cx.stop_propagation(); w.minimize_window(); })
+                                    .child(Icon::new(IconName::WindowMinimize).small())
+                            ))
+                            .when(win_ctrls.maximize, |this| {
+                                let icon = if is_maximized { IconName::WindowRestore } else { IconName::WindowMaximize };
+                                this.child(
+                                    div().id("btn-max")
+                                        .cursor_pointer().flex_shrink_0()
+                                        .rounded_full().w_5().h_5()
+                                        .flex().items_center().justify_center()
+                                        .text_color(btn_fg)
+                                        .hover(move |s| s.bg(btn_hover))
+                                        .active(move |s| s.bg(btn_active))
+                                        .on_mouse_down(MouseButton::Left, |_, w, cx| {
+                                            w.prevent_default(); cx.stop_propagation();
+                                        })
+                                        .on_click(|_, w, cx| { cx.stop_propagation(); w.zoom_window(); })
+                                        .child(Icon::new(icon).small())
+                                )
+                            })
+                            .child(
+                                div().id("btn-close")
+                                    .cursor_pointer().flex_shrink_0()
+                                    .rounded_full().w_5().h_5()
+                                    .flex().items_center().justify_center()
+                                    .text_color(btn_fg)
+                                    .hover(move |s| s.bg(close_hover).text_color(close_fg))
+                                    .active(move |s| s.bg(close_active).text_color(close_fg))
+                                    .on_mouse_down(MouseButton::Left, |_, w, cx| {
+                                        w.prevent_default(); cx.stop_propagation();
+                                    })
+                                    .on_click(|_, w, cx| { cx.stop_propagation(); w.remove_window(); })
+                                    .child(Icon::new(IconName::WindowClose).small())
+                            )
+                        )
+                    )
+            )
             .child(h_flex().flex_1().min_h_0()
                 .child(Sidebar::new("main-sidebar").w(px(240.))
                     .collapsible(SidebarCollapsible::Icon).collapsed(collapsed)
@@ -590,7 +681,7 @@ fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
                         .child(Icon::new(IconName::SquareTerminal).small())
                         .child(v_flex().flex_1().overflow_hidden().gap_0p5()
                             .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(cx.theme().foreground).child(s.label.clone()))
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).font_family("monospace".into()).child(s.command.clone())))
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).font_family("monospace").child(s.command.clone())))
                         .into_any_element()
                 }).collect()
             }))
@@ -606,7 +697,7 @@ fn render_known_hosts_view(state: &AppState) -> impl IntoElement {
             .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("Known Hosts"))
             .child(div().flex_1())
             .child(div().text_xs().text_color(gpui::rgb(0x7b84a8)).child(format!("{} entries", state.known_host_entries.len()))))
-        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace".into()).text_xs().text_color(gpui::rgb(0x9aa3bf))
+        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace").text_xs().text_color(gpui::rgb(0x9aa3bf))
             .children(state.known_host_entries.iter().map(|e| div().py_1().child(e.clone())).collect::<Vec<_>>()))
 }
 
@@ -623,7 +714,7 @@ fn render_logs_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.log_lines = AppState::load_logs(&this.data_dir); cx.notify();
                 })).child("Refresh")))
-        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace".into()).text_xs().text_color(cx.theme().muted_foreground)
+        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace").text_xs().text_color(cx.theme().muted_foreground)
             .children(state.log_lines.iter().map(|l| div().py_0p5().child(l.clone())).collect::<Vec<_>>()))
 }
 
@@ -725,7 +816,7 @@ fn render_host_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
                                 .child(Icon::new(IconName::HardDrive).small())
                                 .child(v_flex().gap_0p5()
                                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(cx.theme().foreground).child(k.label.clone()))
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(&k.fingerprint[..20.min(k.fingerprint.len())])))
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(k.fingerprint[..20.min(k.fingerprint.len())].to_string())))
                                 .into_any_element()
                         }))
                 )))
@@ -777,7 +868,7 @@ fn btn(label: &str, primary: bool, cx: &mut Context<AppState>,
        f: impl Fn(&mut AppState, &mut Context<AppState>) + 'static) -> impl IntoElement {
     let id = format!("btn-{}", label.to_lowercase().replace(' ', "-"));
     let lbl = label.to_string();
-    div().id(id.into()).h_8().px_3()
+    div().id(id).h_8().px_3()
         .rounded(cx.theme().radius).flex().items_center().gap_1().text_sm()
         .font_weight(FontWeight::MEDIUM).cursor_pointer()
         .when(primary, |d| d.bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
@@ -843,7 +934,11 @@ pub fn run(data_dir: PathBuf) {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                     point(px(100.), px(100.)), size(px(1200.), px(800.))))),
                 #[cfg(not(target_os = "linux"))]
-                titlebar: Some(TitleBar::title_bar_options()),
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(9.0), px(9.0))),
+                }),
                 #[cfg(target_os = "linux")]
                 window_background: WindowBackgroundAppearance::Transparent,
                 #[cfg(target_os = "linux")]
