@@ -2,6 +2,8 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
     h_flex,
+    input::{Input, InputState},
+    form::{field, v_form},
     sidebar::{
         Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu,
         SidebarMenuItem, SidebarToggleButton,
@@ -67,7 +69,7 @@ pub struct AppState {
     status_message: String,
     host_form: HostForm,
     key_gen_form: KeyGenForm,
-    vault_password: SharedString,
+    vault_password: Entity<InputState>,
     available_keys: Vec<SshKey>,
     known_host_entries: Vec<String>,
     log_lines: Vec<String>,
@@ -141,32 +143,47 @@ impl TabState {
 
 #[derive(Clone)]
 struct HostForm {
-    label: SharedString, hostname: SharedString, port: SharedString,
-    username: SharedString, auth_type: String,
-    selected_key_id: Option<String>, group: SharedString,
+    label: Entity<InputState>, hostname: Entity<InputState>, port: Entity<InputState>,
+    username: Entity<InputState>, group: Entity<InputState>, password: Entity<InputState>,
+    auth_type: String,
+    selected_key_id: Option<String>,
+    editing_id: Option<String>,
 }
 
-impl Default for HostForm {
-    fn default() -> Self {
-        Self { label: "".into(), hostname: "".into(), port: "22".into(),
-               username: "root".into(), auth_type: "key".into(),
-               selected_key_id: None, group: "".into() }
+impl HostForm {
+    fn new(window: &mut Window, cx: &mut Context<AppState>) -> Self {
+        Self {
+            label: cx.new(|cx| InputState::new(window, cx).placeholder("Label")),
+            hostname: cx.new(|cx| InputState::new(window, cx).placeholder("Hostname")),
+            username: cx.new(|cx| InputState::new(window, cx).placeholder("Usuario").default_value("root")),
+            port: cx.new(|cx| InputState::new(window, cx).placeholder("Puerto").default_value("22")),
+            group: cx.new(|cx| InputState::new(window, cx).placeholder("Grupo")),
+            password: cx.new(|cx| InputState::new(window, cx).placeholder("Password")),
+            auth_type: "key".into(),
+            selected_key_id: None,
+            editing_id: None,
+        }
     }
 }
 
 #[derive(Clone)]
 struct KeyGenForm {
-    label: SharedString, key_type: String, passphrase: SharedString,
+    label: Entity<InputState>, passphrase: Entity<InputState>,
+    key_type: String,
 }
 
-impl Default for KeyGenForm {
-    fn default() -> Self {
-        Self { label: "".into(), key_type: "ed25519".into(), passphrase: "".into() }
+impl KeyGenForm {
+    fn new(window: &mut Window, cx: &mut Context<AppState>) -> Self {
+        Self {
+            label: cx.new(|cx| InputState::new(window, cx)),
+            passphrase: cx.new(|cx| InputState::new(window, cx)),
+            key_type: "ed25519".into(),
+        }
     }
 }
 
 impl AppState {
-    pub fn new(data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(data_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let host_db = Arc::new(HostDb::open(&data_dir).expect("open db"));
         let vault = Arc::new(parking_lot::Mutex::new(Vault::open(&data_dir).expect("open vault")));
         let snippet_store = SnippetStore::open(&data_dir.join("snippets.db")).ok();
@@ -183,8 +200,10 @@ impl AppState {
             hosts, groups, vault_unlocked: vok,
             modal: if vok { None } else { Some(Modal::VaultUnlock) },
             status_message: String::new(),
-            host_form: HostForm::default(), key_gen_form: KeyGenForm::default(),
-            vault_password: "".into(), available_keys: vec![],
+            host_form: HostForm::new(window, cx),
+            key_gen_form: KeyGenForm::new(window, cx),
+            vault_password: cx.new(|cx| InputState::new(window, cx)),
+            available_keys: vec![],
             known_host_entries: known, log_lines: logs,
             sftp: SftpState::default(),
             search_query: "".into(),
@@ -249,7 +268,7 @@ impl AppState {
     }
 
     fn unlock_vault(&mut self, cx: &mut Context<Self>) {
-        let pw: String = self.vault_password.clone().into();
+        let pw = self.vault_password.read(cx).value().to_string();
         {
             let mut vault = self.vault.lock();
             match vault.unlock(&pw) {
@@ -269,21 +288,33 @@ impl AppState {
     }
 
     fn save_host(&mut self, cx: &mut Context<Self>) {
-        let id = Uuid::new_v4().to_string();
-        let port: u16 = self.host_form.port.clone().to_string().parse().unwrap_or(22);
+        let editing = self.host_form.editing_id.take();
+        let id = editing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let label = self.host_form.label.read(cx).value().to_string();
+        let hostname = self.host_form.hostname.read(cx).value().to_string();
+        let username = self.host_form.username.read(cx).value().to_string();
+        let port: u16 = self.host_form.port.read(cx).value().parse().unwrap_or(22);
+        let group = self.host_form.group.read(cx).value().to_string();
         let auth_method = match self.host_form.auth_type.as_str() {
-            "password" => AuthMethod::Password { vault_id: String::new() },
+            "password" => {
+                let vault_id = Uuid::new_v4().to_string();
+                let pw = self.host_form.password.read(cx).value().to_string();
+                {
+                    let mut vault = self.vault.lock();
+                    let _ = vault.put(&vault_id, "", SecretKind::Password, pw.as_bytes());
+                }
+                AuthMethod::Password { vault_id }
+            }
             "key" => AuthMethod::Key {
                 vault_id: self.host_form.selected_key_id.clone().unwrap_or_default(),
             },
             _ => AuthMethod::Agent,
         };
         let host = Host {
-            id, label: self.host_form.label.clone().into(),
-            hostname: self.host_form.hostname.clone().into(),
-            port, username: self.host_form.username.clone().into(),
-            auth_method, group_name: if self.host_form.group.clone().to_string().is_empty() {
-                None } else { Some(self.host_form.group.clone().into()) },
+            id, label, hostname,
+            port, username,
+            auth_method,
+            group_name: if group.is_empty() { None } else { Some(group) },
             tags: vec![], bastion_id: None, keep_alive_secs: 30,
             created_at: 0, updated_at: 0,
         };
@@ -294,7 +325,6 @@ impl AppState {
             self.status_message = format!("Host '{}' guardado", host.label);
         }
         self.modal = None;
-        self.host_form = HostForm::default();
         cx.notify();
     }
 
@@ -312,9 +342,9 @@ impl AppState {
             "ecdsa-p256" => KeyType::EcdsaP256,
             _ => KeyType::Ed25519,
         };
-        let label: String = self.key_gen_form.label.clone().into();
+        let label = self.key_gen_form.label.read(cx).value().to_string();
         let lbl = if label.is_empty() { "ssh-key".to_string() } else { label };
-        let pass: String = self.key_gen_form.passphrase.clone().into();
+        let pass = self.key_gen_form.passphrase.read(cx).value().to_string();
 
         match keys::generate(&lbl, kt, &pass) {
             Ok(key) => {
@@ -328,7 +358,6 @@ impl AppState {
                 self.available_keys.push(key);
                 self.status_message = format!("Key '{}' generada", lbl);
                 self.modal = None;
-                self.key_gen_form = KeyGenForm::default();
             }
             Err(e) => { self.status_message = format!("Error: {e}"); }
         }
@@ -859,9 +888,6 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
                 .flex().items_center().text_sm().cursor_pointer()
                 .hover(|d| d.bg(cx.theme().primary_hover))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
-                    // Open host editor for quick connect
-                    this.host_form = HostForm::default();
-                    this.host_form.label = "quick".into();
                     this.modal = Some(Modal::HostEditor);
                     cx.notify();
                 }))
@@ -896,7 +922,8 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
 }
 
 fn render_host_card(host: &Host, state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
-    let hid = host.id.clone(); let hid2 = host.id.clone(); let hid3 = host.id.clone();
+    let hid = host.id.clone(); let hid2 = host.id.clone();
+    let hid_edit = host.id.clone(); let hid_del = host.id.clone();
     let lbl = host.label.clone();
     let sel = state.selected_host_id.as_deref() == Some(&host.id);
     let conn = state.tabs.iter().any(|t| t.connected);
@@ -919,6 +946,24 @@ fn render_host_card(host: &Host, state: &AppState, cx: &mut Context<AppState>) -
             .child(div().text_xs().text_color(cx.theme().muted_foreground)
                 .child(format!("ssh  {}@{}:{}", host.username, host.hostname, host.port))))
         .when(conn, |d| d.child(div().size_2().rounded_full().flex_shrink_0().bg(rgb(0x22c55e))))
+        .child(h_flex().gap_1().ml_2()
+            .child(div().id(format!("edit-host-{}", hid_edit)).px_2().py_1().rounded(cx.theme().radius)
+                .bg(cx.theme().secondary).text_xs().cursor_pointer()
+                .hover(|d| d.bg(cx.theme().secondary_hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.host_form.editing_id = Some(hid_edit.clone());
+                    this.modal = Some(Modal::HostEditor);
+                    cx.notify();
+                }))
+                .child("Editar"))
+            .child(div().id(format!("del-host-{}", hid_del)).px_2().py_1().rounded(cx.theme().radius)
+                .bg(rgb(0xef4444)).text_color(rgb(0xffffff)).text_xs().cursor_pointer()
+                .hover(|d| d.bg(rgb(0xdc2626)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.modal = Some(Modal::ConfirmDelete(hid_del.clone()));
+                    cx.notify();
+                }))
+                .child("Eliminar")))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1600,12 +1645,12 @@ fn render_modal(state: &AppState, cx: &mut Context<AppState>, modal: &Modal) -> 
 
 fn render_host_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     v_flex().gap_3()
-        .child(form_input("Label", &state.host_form.label, cx, |s, v, cx| { s.host_form.label = v.into(); cx.notify(); }))
-        .child(form_input("Hostname", &state.host_form.hostname, cx, |s, v, cx| { s.host_form.hostname = v.into(); cx.notify(); }))
+        .child(Input::new(&state.host_form.label))
+        .child(Input::new(&state.host_form.hostname))
         .child(h_flex().gap_3()
-            .child(div().flex_1().child(form_input("Usuario", &state.host_form.username, cx, |s, v, cx| { s.host_form.username = v.into(); cx.notify(); })))
-            .child(div().w(px(80.)).child(form_input("Puerto", &state.host_form.port, cx, |s, v, cx| { s.host_form.port = v.into(); cx.notify(); }))))
-        .child(form_input("Grupo", &state.host_form.group, cx, |s, v, cx| { s.host_form.group = v.into(); cx.notify(); }))
+            .child(div().flex_1().child(Input::new(&state.host_form.username)))
+            .child(div().w(px(80.)).child(Input::new(&state.host_form.port))))
+        .child(Input::new(&state.host_form.group))
         // Auth selector
         .child(v_flex().gap_1p5()
             .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().foreground).child("Autenticación"))
@@ -1644,6 +1689,9 @@ fn render_host_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
                         }))
                 )))
         })
+        .when(state.host_form.auth_type == "password", |d| {
+            d.child(Input::new(&state.host_form.password))
+        })
         .child(h_flex().gap_2().justify_end().pt_1()
             .child(btn("Cancelar", false, cx, |s, cx| { s.modal = None; cx.notify(); }))
             .child(btn("Guardar", true, cx, |s, cx| { s.save_host(cx); })))
@@ -1651,11 +1699,11 @@ fn render_host_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
 
 fn render_key_gen_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     v_flex().gap_3()
-        .child(form_input("Label", &state.key_gen_form.label, cx, |s, v, cx| { s.key_gen_form.label = v.into(); cx.notify(); }))
+        .child(Input::new(&state.key_gen_form.label))
         .child(h_flex().gap_2()
             .child(toggle("Ed25519", &state.key_gen_form.key_type == "ed25519", cx, |s, cx| { s.key_gen_form.key_type = "ed25519".into(); cx.notify(); }))
             .child(toggle("ECDSA P-256", &state.key_gen_form.key_type == "ecdsa-p256", cx, |s, cx| { s.key_gen_form.key_type = "ecdsa-p256".into(); cx.notify(); })))
-        .child(form_input("Passphrase", &state.key_gen_form.passphrase, cx, |s, v, cx| { s.key_gen_form.passphrase = v.into(); cx.notify(); }))
+        .child(Input::new(&state.key_gen_form.passphrase))
         .child(h_flex().gap_2().justify_end().pt_1()
             .child(btn("Cancelar", false, cx, |s, cx| { s.modal = None; cx.notify(); }))
             .child(btn("Generar", true, cx, |s, cx| { s.generate_key(cx); })))
@@ -1664,7 +1712,7 @@ fn render_key_gen_form(state: &AppState, cx: &mut Context<AppState>) -> impl Int
 fn render_vault_unlock_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     v_flex().gap_3()
         .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Ingresa la contraseña del vault para desbloquear tus keys SSH."))
-        .child(form_input("Contraseña", &state.vault_password, cx, |s, v, cx| { s.vault_password = v.into(); cx.notify(); }))
+        .child(Input::new(&state.vault_password))
         .child(h_flex().gap_2().justify_end().pt_1()
             .child(btn("Cancelar", false, cx, |s, cx| { s.modal = None; cx.notify(); }))
             .child(btn("Desbloquear", true, cx, |s, cx| { s.unlock_vault(cx); })))
@@ -1709,36 +1757,6 @@ fn toggle(label: &str, active: bool, cx: &mut Context<AppState>,
         .bg(if active { cx.theme().primary } else { cx.theme().secondary })
         .text_color(if active { cx.theme().primary_foreground } else { cx.theme().foreground })
         .child(lbl).on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
-}
-
-fn form_input(_label: &str, value: &SharedString, cx: &mut Context<AppState>,
-              on_change: impl Fn(&mut AppState, String, &mut Context<AppState>) + 'static) -> impl IntoElement {
-    // Editable text input using track_focus + on_key_down
-    let val = value.clone();
-    let display = if val.is_empty() { " ".to_string() } else { val.to_string() };
-    let focus_handle = cx.focus_handle();
-    let val2 = val.clone();
-    div().h_9().px_3().rounded(cx.theme().radius).bg(cx.theme().background)
-        .border_1().border_color(cx.theme().border).flex().items_center()
-        .track_focus(&focus_handle)
-        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |_this, _event: &gpui::MouseDownEvent, window, cx| {
-            cx.focus_self(window);
-        }))
-        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
-            let key = &event.keystroke.key;
-            if key == "backspace" {
-                let mut v: String = val2.clone().into();
-                v.pop();
-                on_change(this, v, cx);
-            } else if key == "enter" || key == "return" {
-                // ignore
-            } else if key.len() == 1 && !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
-                let mut v: String = val2.clone().into();
-                v.push_str(key);
-                on_change(this, v, cx);
-            }
-        }))
-        .child(div().text_sm().text_color(cx.theme().foreground).child(display))
 }
 
 fn empty(title: &str, desc: &str, icon: IconName, cx: &mut Context<AppState>) -> impl IntoElement {
@@ -1789,7 +1807,8 @@ pub fn run(data_dir: PathBuf) {
                 ..Default::default()
             },
             move |window, cx| {
-                let state = cx.new(move |cx| AppState::new(data_dir.clone(), cx));
+                let data_dir = data_dir.clone();
+                let state = cx.new(|cx| AppState::new(data_dir, window, cx));
                 cx.new(|cx| Root::new(state, window, cx))
             },
         ).unwrap();
