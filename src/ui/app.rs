@@ -297,12 +297,23 @@ impl AppState {
         let group = self.host_form.group.read(cx).value().to_string();
         let auth_method = match self.host_form.auth_type.as_str() {
             "password" => {
+                if !self.vault_unlocked {
+                    self.status_message = "Desbloquea el vault primero".into();
+                    cx.notify();
+                    return;
+                }
                 let vault_id = Uuid::new_v4().to_string();
                 let pw = self.host_form.password.read(cx).value().to_string();
                 {
                     let mut vault = self.vault.lock();
-                    let _ = vault.put(&vault_id, "", SecretKind::Password, pw.as_bytes());
+                    if let Err(e) = vault.put(&vault_id, "", SecretKind::Password, pw.as_bytes()) {
+                        self.status_message = format!("Error guardando password: {e}");
+                        cx.notify();
+                        return;
+                    }
                 }
+                AuthMethod::Password { vault_id }
+            }
                 AuthMethod::Password { vault_id }
             }
             "key" => AuthMethod::Key {
@@ -383,6 +394,12 @@ impl AppState {
     }
 
     fn connect_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        if !self.vault_unlocked {
+            self.modal = Some(Modal::VaultUnlock);
+            self.status_message = "Desbloquea el vault para conectar".into();
+            cx.notify();
+            return;
+        }
         if let Some(host) = self.hosts.iter().find(|h| h.id == host_id).cloned() {
             // Always create a new tab with unique ID — allows multiple sessions to same host
             let unique_tab_id = Uuid::new_v4().to_string();
@@ -556,6 +573,12 @@ impl AppState {
 
     /// Connect to a host for SFTP browsing.
     fn connect_sftp_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        if !self.vault_unlocked {
+            self.modal = Some(Modal::VaultUnlock);
+            self.status_message = "Desbloquea el vault para conectar".into();
+            cx.notify();
+            return;
+        }
         let host = match self.hosts.iter().find(|h| h.id == host_id).cloned() {
             Some(h) => h,
             None => return,
