@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, input::TextInput, sidebar::{
+use gpui_component::{h_flex, sidebar::{
     Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader,
     SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 }, v_flex, ActiveTheme, Icon, IconName, Root, Sizable, TitleBar};
@@ -135,7 +135,9 @@ impl AppState {
         let log_dir = data_dir.join("logs");
         if let Ok(entries) = std::fs::read_dir(&log_dir) {
             let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            files.sort_by_key(|e| e.metadata().map(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH).max(std::time::UNIX_EPOCH));
+            files.sort_by_key(|e| {
+                e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            });
             if let Some(latest) = files.last() {
                 return std::fs::read_to_string(latest.path()).unwrap_or_default()
                     .lines().rev().take(100).map(|l| l.to_string()).collect();
@@ -287,23 +289,22 @@ impl AppState {
 
             let host_id2 = host_id.to_string();
             let data_dir = self.data_dir.clone();
-            cx.spawn(|this, mut cx| async move {
+            let hostname = host.hostname.clone();
+            let username = host.username.clone();
+            let port = host.port;
+            cx.spawn(|mut cx| async move {
                 let result = SshSession::connect(
-                    &host.hostname, host.port, &host.username,
-                    "", // key_path — needs vault resolution
-                    &data_dir,
+                    &hostname, port, &username, "", &data_dir,
                 ).await;
-                let _ = cx.update(|_window, cx| {
-                    this.update(cx, |this, cx| {
-                        let msg = match result {
-                            Ok(_) => { this.tabs[tab_idx].connected = true; "Conectado".into() }
-                            Err(e) => { format!("Error: {e}") }
-                        };
-                        this.status_message = msg;
-                        cx.notify();
-                    });
-                });
-            });
+                cx.update(|_window, this: &mut AppState, cx| {
+                    this.tabs.iter_mut().find(|t| t.id == host_id2).map(|t| t.connected = true);
+                    this.status_message = match result {
+                        Ok(_) => "Conectado".into(),
+                        Err(e) => format!("Error: {e}"),
+                    };
+                    cx.notify();
+                }).ok();
+            }).detach();
             cx.notify();
         }
     }
@@ -433,7 +434,7 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
                 .bg(cx.theme().secondary).items_center().gap_1()
                 .child(Icon::new(IconName::Search).small())
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Buscar..."))))
-        .child(div().id("host-scroll").flex_1().overflow_y_scroll().p_4()
+        .child(div().id("host-scroll").flex_1().overflow_y_scrollbar().p_4()
             .children({
                 let mut items: Vec<AnyElement> = vec![];
                 if state.hosts.is_empty() {
@@ -488,7 +489,7 @@ fn render_keychain_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
             }))
             .child(div().flex_1())
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} keys", state.available_keys.len()))))
-        .child(div().flex_1().overflow_y_scroll().p_4()
+        .child(div().flex_1().overflow_y_scrollbar().p_4()
             .children(if !vok {
                 vec![empty("Vault bloqueado", "Desbloquea el vault para ver tus keys.", IconName::HardDrive, cx).into_any_element()]
             } else if state.available_keys.is_empty() {
@@ -536,7 +537,7 @@ fn render_port_forward_view(state: &AppState, cx: &mut Context<AppState>) -> imp
             }))
             .child(div().flex_1())
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} rules", rules.len()))))
-        .child(div().flex_1().overflow_y_scroll().p_4()
+        .child(div().flex_1().overflow_y_scrollbar().p_4()
             .children(if rules.is_empty() {
                 vec![empty("Sin reglas", "Agrega reglas de port forwarding.", IconName::Network, cx).into_any_element()]
             } else {
@@ -574,13 +575,13 @@ fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
             }))
             .child(div().flex_1())
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{} snippets", snippets.len()))))
-        .child(div().flex_1().overflow_y_scroll().p_4()
+        .child(div().flex_1().overflow_y_scrollbar().p_4()
             .children(if snippets.is_empty() {
                 vec![empty("Sin snippets", "Guarda comandos frecuentes.", IconName::SquareTerminal, cx).into_any_element()]
             } else {
                 snippets.iter().map(|s| {
                     let cmd = s.command.clone();
-                    h_flex().w_full().px_3().py_2().rounded(cx.theme().radius).gap_3().bg(cx.theme().background)
+                    h_flex().id(format!("snip-{}", s.id)).w_full().px_3().py_2().rounded(cx.theme().radius).gap_3().bg(cx.theme().background)
                         .border_1().border_color(cx.theme().border).mb_1().cursor_pointer().hover(|d| d.bg(cx.theme().accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.status_message = format!("Snippet: {}", &cmd);
@@ -605,7 +606,7 @@ fn render_known_hosts_view(state: &AppState) -> impl IntoElement {
             .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("Known Hosts"))
             .child(div().flex_1())
             .child(div().text_xs().text_color(gpui::rgb(0x7b84a8)).child(format!("{} entries", state.known_host_entries.len()))))
-        .child(div().flex_1().overflow_y_scroll().p_4().font_family("monospace".into()).text_xs().text_color(gpui::rgb(0x9aa3bf))
+        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace".into()).text_xs().text_color(gpui::rgb(0x9aa3bf))
             .children(state.known_host_entries.iter().map(|e| div().py_1().child(e.clone())).collect::<Vec<_>>()))
 }
 
@@ -619,10 +620,10 @@ fn render_logs_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
             .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("Logs"))
             .child(div().flex_1())
             .child(div().id("refresh-logs").text_xs().text_color(cx.theme().primary).cursor_pointer()
-                .child("Refresh").on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, _, _, cx| {
                     this.log_lines = AppState::load_logs(&this.data_dir); cx.notify();
-                }))))
-        .child(div().flex_1().overflow_y_scroll().p_4().font_family("monospace".into()).text_xs().text_color(cx.theme().muted_foreground)
+                })).child("Refresh")))
+        .child(div().flex_1().overflow_y_scrollbar().p_4().font_family("monospace".into()).text_xs().text_color(cx.theme().muted_foreground)
             .children(state.log_lines.iter().map(|l| div().py_0p5().child(l.clone())).collect::<Vec<_>>()))
 }
 
@@ -676,10 +677,10 @@ fn render_modal(state: &AppState, cx: &mut Context<AppState>, modal: &Modal) -> 
         .child(v_flex().w(px(460.)).rounded_xl().bg(cx.theme().background).border_1().border_color(cx.theme().border).p_6().gap_4()
             .child(h_flex().items_center().justify_between()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_base().child(title))
-                .child(div().size_6().rounded(cx.theme().radius).flex().items_center().justify_center()
+                .child(div().id("btn-close-modal").size_6().rounded(cx.theme().radius).flex().items_center().justify_center()
                     .bg(cx.theme().secondary).cursor_pointer().hover(|d| d.bg(cx.theme().secondary_hover))
-                    .child(Icon::new(IconName::Close).small())
-                    .on_click(cx.listener(|this, _, _, cx| { this.modal = None; cx.notify(); }))))
+                    .on_click(cx.listener(|this, _, _, cx| { this.modal = None; cx.notify(); }))
+                    .child(Icon::new(IconName::Close).small())))
             .child(body))
 }
 
@@ -710,12 +711,12 @@ fn render_host_form(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
                         state.available_keys.iter().find(|k| &k.fingerprint == kid).map(|k| k.label.clone()).unwrap_or_else(|| "Seleccionar...".into())
                     } else { "Seleccionar...".to_string() }))
                 .when(!state.available_keys.is_empty(), |d| d.child(
-                    v_flex().gap_0p5().max_h(px(160.)).overflow_y_scroll().border_1().border_color(cx.theme().border)
+                    v_flex().gap_0p5().max_h(px(160.)).overflow_y_scrollbar().border_1().border_color(cx.theme().border)
                         .rounded(cx.theme().radius)
                         .children(state.available_keys.iter().map(|k| {
                             let fp = k.fingerprint.clone();
                             let sel = state.host_form.selected_key_id.as_deref() == Some(&fp);
-                            h_flex().px_3().py_2().gap_2().cursor_pointer()
+                            h_flex().id(format!("key-{}", &fp[..8])).px_3().py_2().gap_2().cursor_pointer()
                                 .bg(if sel { cx.theme().accent } else { cx.theme().background })
                                 .hover(|d| d.bg(cx.theme().accent))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -762,9 +763,10 @@ fn render_confirm_delete(id: String, label: &str, cx: &mut Context<AppState>) ->
             .child(format!("¿Eliminar \"{}\" permanentemente?", label)))
         .child(h_flex().gap_2().justify_end().pt_1()
             .child(btn("Cancelar", false, cx, |s, cx| { s.modal = None; cx.notify(); }))
-            .child(div().px_4().py_2().rounded(cx.theme().radius).bg(rgb(0xef4444)).text_color(rgb(0xffffff))
+            .child(div().id("btn-delete-confirm").px_4().py_2().rounded(cx.theme().radius).bg(rgb(0xef4444)).text_color(rgb(0xffffff))
                 .text_sm().font_weight(FontWeight::MEDIUM).cursor_pointer().hover(|d| d.bg(rgb(0xdc2626)))
-                .child("Eliminar").on_click(cx.listener(move |this, _, _, cx| { this.delete_host(&id2, cx); }))))
+                .on_click(cx.listener(move |this, _, _, cx| { this.delete_host(&id2, cx); }))
+                .child("Eliminar")))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -773,23 +775,26 @@ fn render_confirm_delete(id: String, label: &str, cx: &mut Context<AppState>) ->
 
 fn btn(label: &str, primary: bool, cx: &mut Context<AppState>,
        f: impl Fn(&mut AppState, &mut Context<AppState>) + 'static) -> impl IntoElement {
-    div().id(format!("btn-{}", label.to_lowercase().replace(' ', "-"))).h_8().px_3()
+    let id = format!("btn-{}", label.to_lowercase().replace(' ', "-"));
+    let lbl = label.to_string();
+    div().id(id.into()).h_8().px_3()
         .rounded(cx.theme().radius).flex().items_center().gap_1().text_sm()
         .font_weight(FontWeight::MEDIUM).cursor_pointer()
         .when(primary, |d| d.bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
               .hover(|d| d.bg(cx.theme().primary_hover)))
         .when(!primary, |d| d.bg(cx.theme().secondary).border_1().border_color(cx.theme().border)
               .hover(|d| d.bg(cx.theme().secondary_hover)))
-        .child(label).on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+        .child(lbl).on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
 }
 
 fn toggle(label: &str, active: bool, cx: &mut Context<AppState>,
           f: impl Fn(&mut AppState, &mut Context<AppState>) + 'static) -> impl IntoElement {
-    div().flex_1().h_9().rounded(cx.theme().radius).flex().items_center().justify_center()
+    let lbl = label.to_string();
+    div().id(format!("tgl-{}", label.to_lowercase())).flex_1().h_9().rounded(cx.theme().radius).flex().items_center().justify_center()
         .text_sm().font_weight(FontWeight::MEDIUM).cursor_pointer()
         .bg(if active { cx.theme().primary } else { cx.theme().secondary })
         .text_color(if active { cx.theme().primary_foreground } else { cx.theme().foreground })
-        .child(label).on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
+        .child(lbl).on_click(cx.listener(move |this, _, _, cx| f(this, cx)))
 }
 
 fn form_input(_label: &str, value: &SharedString, cx: &mut Context<AppState>,
@@ -804,10 +809,12 @@ fn form_input(_label: &str, value: &SharedString, cx: &mut Context<AppState>,
 }
 
 fn empty(title: &str, desc: &str, icon: IconName, cx: &mut Context<AppState>) -> impl IntoElement {
+    let t = title.to_string();
+    let d = desc.to_string();
     v_flex().size_full().items_center().justify_center().gap_2().pt_16()
         .child(Icon::new(icon).large())
-        .child(div().font_weight(FontWeight::SEMIBOLD).text_base().child(title))
-        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(desc))
+        .child(div().font_weight(FontWeight::SEMIBOLD).text_base().child(t))
+        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(d))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
