@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use russh_keys::{key::KeyPair, load_secret_key};
 
 /// Key types supported for generation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum KeyType {
     Ed25519,
     EcdsaP256,
@@ -29,7 +29,7 @@ impl KeyType {
 }
 
 /// A generated or imported SSH key.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SshKey {
     pub label: String,
     pub key_type: KeyType,
