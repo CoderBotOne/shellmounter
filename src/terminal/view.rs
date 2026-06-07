@@ -161,23 +161,27 @@ impl TerminalView {
             0
         };
 
-        let mut lines = Vec::with_capacity(visible);
-        for row_offset in 0..visible {
-            let line_idx = start + row_offset;
-            let mut line_str = String::with_capacity(self.size.cols);
-            for col in 0..self.size.cols {
-                if let Some(cell) = grid.get(line_idx, col) {
-                    let ch = cell.c;
-                    if ch == '\0' || ch == ' ' && col == self.size.cols - 1 && line_str.trim_end().is_empty() {
-                        // Skip trailing empty
-                    } else {
-                        line_str.push(ch);
-                    }
-                } else {
-                    line_str.push(' ');
+        let mut lines: Vec<String> = Vec::with_capacity(visible);
+        // Use display_iter() which works at this alacritty_terminal version
+        let display_lines: Vec<Vec<char>> = {
+            let mut rows: Vec<Vec<char>> = vec![vec![' '; self.size.cols]; visible];
+            for cell in grid.display_iter() {
+                if cell.point.line.0 < 0 { continue; }
+                let row = cell.point.line.0 as usize;
+                if row < start { continue; }
+                let rel_row = row - start;
+                if rel_row >= visible { break; }
+                let col = cell.point.column.0 as usize;
+                if col < self.size.cols {
+                    rows[rel_row][col] = cell.c;
                 }
             }
-            lines.push(line_str.trim_end().to_string());
+            rows
+        };
+        for row_chars in display_lines {
+            let line_str: String = row_chars.iter().collect();
+            let trimmed = line_str.trim_end().to_string();
+            lines.push(trimmed);
         }
         drop(term);
 

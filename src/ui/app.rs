@@ -1,13 +1,13 @@
 use gpui::prelude::*;
-use gpui::{
-    rgb, rgba, hsla, px, AnyElement, Context, Decorations, ElementId, FontWeight,
-    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement, Render, ScrollWheelEvent, SharedString, Window, WindowControlArea,
+use gpui::*;
+use gpui_component::{
+    h_flex,
+    sidebar::{
+        Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu,
+        SidebarMenuItem, SidebarToggleButton,
+    },
+    v_flex, ActiveTheme, Icon, IconName, Root, Sizable,
 };
-use gpui_component::{h_flex, sidebar::{
-    Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader,
-    SidebarMenu, SidebarMenuItem, SidebarToggleButton,
-}, v_flex, ActiveTheme, Icon, IconName, Root, Sizable};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_platform::application;
 use std::path::{Path, PathBuf};
@@ -464,17 +464,17 @@ impl AppState {
                                     tokio::time::timeout(
                                         std::time::Duration::from_millis(100),
                                         s.recv(),
-                                    ).await.ok().flatten().ok().flatten()
+                                    ).await
                                 };
                                 match data {
-                                    Some(bytes) => {
+                                    Ok(Ok(Some(bytes))) => {
                                         let mut t = term.lock();
                                         t.write(&bytes);
                                         drop(t);
                                         // Only notify UI when data arrives
-                                        let _ = cx.update(|_, _, _| {});
+                                        // UI will update on next recv
                                     }
-                                    None => {
+                                    _ => {
                                         // Check if session is still open
                                         let open = sess.lock().is_open();
                                         if !open {
@@ -852,7 +852,7 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
                 .bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
                 .flex().items_center().text_sm().cursor_pointer()
                 .hover(|d| d.bg(cx.theme().primary_hover))
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
                     // Open host editor for quick connect
                     this.host_form = HostForm::default();
                     this.host_form.label = "quick".into();
@@ -1032,7 +1032,7 @@ fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
                                     let sess = sess.clone();
                                     let cmd_with_newline = format!("{}\r", cmd);
                                     let data = cmd_with_newline.into_bytes();
-                                    cx.spawn(async move |_cx| {
+                                    cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
                                         let mut s = sess.lock();
                                         let _ = s.send(&data).await;
                                     }).detach();
@@ -1147,6 +1147,9 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
     let terminal = tab.terminal.clone();
     let session = tab.session.clone();
     let tab_id = tab.id.clone();
+    let tab_id_key = tab_id.clone();
+    let tab_id_scroll = tab_id.clone();
+    let tab_id_clip = tab_id.clone();
     let font_size = state.terminal_font_size;
     let active_tab_idx = state.active_tab;
     let num_tabs = state.tabs.len();
@@ -1171,7 +1174,7 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                                     if let Some(tab) = this.tabs.get(idx) {
                                         if let Some(ref sess) = tab.session {
                                             let sess = sess.clone();
-                                            cx.spawn(async move |_cx| {
+                                            cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
                                                 let s = sess.lock();
                                                 // Session will be dropped after close
                                                 drop(s);
@@ -1203,11 +1206,11 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                                 // Paste: read clipboard and send to terminal
                                 if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
                                     if let Some(ref sess) = tab.session {
-                                        let text = cx.read_from_clipboard().unwrap_or_default();
+                                        let text = cx.read_from_clipboard().map(|item| item.text().unwrap_or_default()).unwrap_or_default();
                                         let data = text.into_bytes();
                                         if !data.is_empty() {
                                             let sess = sess.clone();
-                                            cx.spawn(async move |_cx| {
+                                            cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
                                                 let mut s = sess.lock();
                                                 let _ = s.send(&data).await;
                                             }).detach();
@@ -1252,7 +1255,7 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                             if !bytes.is_empty() {
                                 let sess = sess.clone();
                                 let b = bytes;
-                                cx.spawn(async move |_cx| {
+                                cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
                                     let mut s = sess.lock();
                                     let _ = s.send(&b).await;
                                 }).detach();
@@ -1262,9 +1265,13 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                 }))
                 .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
                     // Scroll terminal scrollback
-                    if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
+                    let tid = tab_id_scroll.clone();
+                    if let Some(tab) = this.tabs.iter().find(|t| t.id == tid) {
                         let mut t = tab.terminal.lock();
-                        let delta = event.delta.y;
+                        let delta = match event.delta {
+                            gpui::ScrollDelta::Pixels(pos) => pos.y.into(),
+                            gpui::ScrollDelta::Lines(lines) => lines.y * 18.0,
+                        };
                         if delta > 0.0 {
                             t.scroll((delta / 18.0).ceil() as isize); // ~18px per line
                         } else if delta < 0.0 {
@@ -1274,7 +1281,7 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                     cx.notify();
                 }))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
-                    cx.focus_handle(&this.focus_handle);
+                    cx.focus_handle();
                 }))
                 .child({
                     let lines = {
@@ -1284,11 +1291,12 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                     let fs = font_size;
                     v_flex().gap_0().p_2().font_family("monospace")
                         .text_size(px(fs as f32)).text_color(fg)
-                        .children(lines.iter().map(|line| {
-                            div().h(px((fs + 4) as f32)).child(if line.is_empty() { " " } else { line.as_str() })
+                        .children(lines.into_iter().map(|line| {
+                            div().h(px((fs + 4) as f32)).child(if line.is_empty() { gpui::SharedString::from(" ") } else { gpui::SharedString::from(line.as_str()) })
                         }))
                 })
         )
+        .into_any_element()
 }
 
 fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
@@ -1517,6 +1525,12 @@ fn render_host_item_sftp(host: &Host, selected: Option<String>, cx: &mut Context
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(hname)))
 }
 fn render_host_item(host: &Host, selected: Option<String>, cx: &mut Context<AppState>) -> impl IntoElement {
+    let hid = host.id.clone();
+    let hlabel = host.label.clone();
+    let hname = host.hostname.clone();
+    let is_sel = selected.as_deref() == Some(hid.as_str());
+    let first_char = host.label.chars().next().unwrap_or('?').to_string();
+    let elem_id = format!("host-{}", hid);
     h_flex().id(ElementId::Name(elem_id.into())).px_3().py_2().gap_2().items_center().cursor_pointer()
         .bg(if is_sel { cx.theme().primary } else { cx.theme().background })
         .text_color(if is_sel { cx.theme().primary_foreground } else { cx.theme().foreground })
