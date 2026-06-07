@@ -1806,6 +1806,12 @@ fn render_status_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn run(data_dir: PathBuf) {
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Tokio runtime");
+    let _guard = tokio_rt.enter();
+
     let app = application().with_assets(crate::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
