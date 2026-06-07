@@ -24,13 +24,14 @@ pub struct Host {
     pub updated_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum AuthMethod {
     /// SSH key stored in vault (vault_id)
     Key { vault_id: String },
     /// Password stored in vault (vault_id)
     Password { vault_id: String },
     /// SSH agent forwarding
+    #[default]
     Agent,
 }
 

@@ -1,20 +1,16 @@
-//! Terminal emulation bridge: alacritty_terminal ↔ GPUI.
-//!
-//! Wraps alacritty_terminal's Term for rendering SSH output in GPUI.
-//! Handles ANSI/VT input parsing, grid state, scrollback, and selection.
-//!
-//! Compatible with alacritty_terminal 0.26+ API.
+// Terminal emulation bridge: alacritty_terminal ↔ GPUI.
+// Wraps alacritty_terminal's Term for rendering SSH output in GPUI.
 
 use alacritty_terminal::{
     event::{Event as TermEvent, EventListener},
-    grid::Scroll,
-    selection::Selection,
+    grid::Dimensions,
+    index::Direction,
     sync::FairMutex,
     term::{
-        cell::Flags,
         search::{RegexIter, RegexSearch},
         Term, TermMode,
     },
+    vte::ansi::Processor as VteProcessor,
 };
 use std::sync::Arc;
 
@@ -31,7 +27,7 @@ impl TerminalSize {
     }
 }
 
-/// Event proxy for alacritty_terminal (notifies on bell, title change, etc.)
+/// Event proxy for alacritty_terminal.
 struct EventProxy;
 
 impl EventListener for EventProxy {
@@ -47,7 +43,8 @@ impl EventListener for EventProxy {
 /// The terminal view — wraps alacritty_terminal for GPUI rendering.
 pub struct TerminalView {
     term: Arc<FairMutex<Term<EventProxy>>>,
-    selection: Option<Selection>,
+    parser: VteProcessor,
+    selection: Option<alacritty_terminal::selection::Selection>,
     scroll_offset: usize,
     size: TerminalSize,
     search: Option<RegexSearch>,
@@ -58,20 +55,19 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    /// Create a new terminal view with default config.
     pub fn new(size: TerminalSize) -> Self {
         let config = alacritty_terminal::term::Config::default();
         let term_size = alacritty_terminal::term::test::TermSize::new(size.cols, size.rows);
         let term = Term::new(config, &term_size, EventProxy);
 
-        // Default colors (Catppuccin Mocha)
-        let bg = (30, 30, 46);   // #1e1e2e
-        let fg = (205, 214, 244); // #cdd6f4
-        let cursor = (245, 224, 220); // #f5e0dc
-        let sel = (88, 91, 112);  // #585b70
+        let bg = (30, 30, 46);
+        let fg = (205, 214, 244);
+        let cursor = (245, 224, 220);
+        let sel = (88, 91, 112);
 
         Self {
             term: Arc::new(FairMutex::new(term)),
+            parser: VteProcessor::new(),
             selection: None,
             scroll_offset: 0,
             size,
@@ -86,8 +82,9 @@ impl TerminalView {
     /// Write data to the terminal (from SSH stdout).
     pub fn write(&mut self, data: &[u8]) {
         let mut term = self.term.lock();
-        // In 0.26, write directly to the term — VTE processing is built-in
-        term.write(data);
+        for &byte in data {
+            self.parser.advance(&mut *term, byte);
+        }
     }
 
     /// Resize the terminal grid.
@@ -97,13 +94,14 @@ impl TerminalView {
         term.resize(alacritty_terminal::term::test::TermSize::new(cols, rows));
     }
 
-    /// Get the current terminal contents as text.
+    /// Get the currently selected text.
     pub fn get_selection_text(&self) -> Option<String> {
         let term = self.term.lock();
-        self.selection
-            .as_ref()
-            .map(|sel| term.selection_to_string(sel))
-            .filter(|s| !s.is_empty())
+        if self.selection.is_some() {
+            term.selection_to_string()
+        } else {
+            None
+        }
     }
 
     /// Handle keyboard input.
@@ -119,7 +117,7 @@ impl TerminalView {
     /// Scroll in scrollback.
     pub fn scroll(&mut self, delta: isize) {
         let term = self.term.lock();
-        let total = term.grid().total_lines();
+        let total = term.total_lines();
         let visible = self.size.rows;
         if total > visible {
             let max = total - visible;
@@ -127,7 +125,6 @@ impl TerminalView {
         }
     }
 
-    /// Reset scroll to follow output.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
     }
@@ -143,7 +140,7 @@ impl TerminalView {
             alacritty_terminal::index::Line(0),
             alacritty_terminal::index::Column(0),
         );
-        let mut iter = RegexIter::new(start, end, &term, search);
+        let mut iter = RegexIter::new(start, end, Direction::Right, &term, search);
         iter.next().map(|range| *range.start())
     }
 
@@ -170,7 +167,6 @@ mod tests {
     fn test_terminal_write() {
         let mut term = TerminalView::new(TerminalSize::new(80, 24));
         term.write(b"Hello World\r\n");
-        // Should not crash
     }
 
     #[test]

@@ -1,8 +1,6 @@
-use gpui::*;
-//! Terminal tab component — bridges SSH session + alacritty_terminal + GPUI.
-//!
-//! Each tab holds an SSH session and renders its terminal output.
-//! Keyboard input is captured and sent to the remote PTY.
+// Terminal tab component — bridges SSH session + alacritty_terminal + GPUI.
+// Each tab holds an SSH session and renders its terminal output.
+// Keyboard input is captured and sent to the remote PTY.
 
 use gpui::*;
 use crate::ssh::session::SshSession;
@@ -35,11 +33,8 @@ impl TerminalTab {
 
     /// Handle keyboard input and send to SSH.
     pub fn handle_key(&mut self, text: &str) {
-        let data = self.terminal.handle_input(text);
+        let _data = self.terminal.handle_input(text);
         // TODO: send data to SSH session
-        // if let Some(ref mut session) = self.session {
-        //     tokio::spawn(async move { session.send(&data).await });
-        // }
     }
 }
 
@@ -48,8 +43,5 @@ impl Render for TerminalTab {
         div()
             .size_full()
             .bg(rgb(0x0a0e14))
-            .child(
-                self.terminal.render(_window, _cx)
-            )
     }
 }
