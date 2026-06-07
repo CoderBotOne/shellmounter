@@ -656,6 +656,12 @@ impl AppState {
     }
 }
 
+impl gpui::Focusable for AppState {
+    fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Render principal
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1158,8 +1164,13 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
         .child(render_tab_bar(state, cx))
         .child(
             div().id("terminal-canvas").flex_1().overflow_hidden().bg(bg)
-                .track_focus(&state.focus_handle)
-                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
+                .child(
+                    div().size_full()
+                        .track_focus(&state.focus_handle)
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |_this, _event: &gpui::MouseDownEvent, window, cx| {
+                            cx.focus_self(window);
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
                     let key = &event.keystroke.key;
                     let mods = &event.keystroke.modifiers;
                     let ctrl = mods.control;
@@ -1280,9 +1291,6 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                     }
                     cx.notify();
                 }))
-                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
-                    cx.focus_handle();
-                }))
                 .child({
                     let lines = {
                         let mut t = terminal.lock();
@@ -1295,6 +1303,7 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                             div().h(px((fs + 4) as f32)).child(if line.is_empty() { gpui::SharedString::from(" ") } else { gpui::SharedString::from(line.as_str()) })
                         }))
                 })
+                )
         )
         .into_any_element()
 }
