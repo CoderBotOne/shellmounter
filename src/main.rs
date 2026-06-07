@@ -17,10 +17,14 @@ mod ssh;
 mod terminal;
 mod update;
 mod vault;
+mod fs;
 
 // UI is optional — requires GPUI (not available on all platforms)
 #[cfg(feature = "gui")]
 mod ui;
+
+#[cfg(feature = "gui")]
+mod assets;
 
 use std::path::PathBuf;
 

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Generates all platform icons from a 1024x1024 PNG source.
+# Prerequisites:
+#   macOS:  brew install imagemagick    (or use built-in sips + iconutil)
+#   Linux:  apt install imagemagick
+#   Both:   cargo install rsvg-convert (if starting from SVG)
+
+set -euo pipefail
+
+RESOURCES_DIR="$(cd "$(dirname "$0")/../resources" && pwd)"
+SOURCE="${RESOURCES_DIR}/app-icon.png"
+
+# ── Step 0: create a minimal icon if none exists ────────────────────────────
+if [[ ! -f "$SOURCE" ]]; then
+    echo "No app-icon.png found. Generating a placeholder from assets/icons/square-terminal.svg"
+
+    SVG="${RESOURCES_DIR}/../assets/icons/square-terminal.svg"
+    if [[ ! -f "$SVG" ]]; then
+        echo "ERROR: No SVG source at $SVG"
+        exit 1
+    fi
+
+    if command -v rsvg-convert &>/dev/null; then
+        rsvg-convert -w 1024 -h 1024 "$SVG" -o "$SOURCE"
+    elif command -v convert &>/dev/null; then
+        convert -background none -density 300 -resize 1024x1024 "$SVG" "$SOURCE"
+    else
+        echo "ERROR: Need rsvg-convert or imagemagick to create icon from SVG"
+        echo "Install: brew install librsvg  OR  apt install librsvg2-bin"
+        exit 1
+    fi
+    echo "Created $SOURCE"
+fi
+
+echo "Generating platform icons from $SOURCE …"
+
+# ── macOS: ICNS ────────────────────────────────────────────────────────────
+# Use iconutil (built-in macOS tool) or ImageMagick as fallback
+if command -v iconutil &>/dev/null; then
+    ICONSET="${RESOURCES_DIR}/app-icon.iconset"
+    rm -rf "$ICONSET"
+    mkdir -p "$ICONSET"
+
+    sips -z 16 16     "$SOURCE" --out "$ICONSET/icon_16x16.png"      &>/dev/null
+    sips -z 32 32     "$SOURCE" --out "$ICONSET/icon_16x16@2x.png"   &>/dev/null
+    sips -z 32 32     "$SOURCE" --out "$ICONSET/icon_32x32.png"      &>/dev/null
+    sips -z 64 64     "$SOURCE" --out "$ICONSET/icon_32x32@2x.png"   &>/dev/null
+    sips -z 128 128   "$SOURCE" --out "$ICONSET/icon_128x128.png"    &>/dev/null
+    sips -z 256 256   "$SOURCE" --out "$ICONSET/icon_128x128@2x.png" &>/dev/null
+    sips -z 256 256   "$SOURCE" --out "$ICONSET/icon_256x256.png"    &>/dev/null
+    sips -z 512 512   "$SOURCE" --out "$ICONSET/icon_256x256@2x.png" &>/dev/null
+    sips -z 512 512   "$SOURCE" --out "$ICONSET/icon_512x512.png"    &>/dev/null
+    sips -z 1024 1024 "$SOURCE" --out "$ICONSET/icon_512x512@2x.png" &>/dev/null
+
+    iconutil -c icns "$ICONSET" -o "${RESOURCES_DIR}/app-icon.icns"
+    rm -rf "$ICONSET"
+    echo "  ✔  app-icon.icns (via iconutil)"
+elif command -v convert &>/dev/null; then
+    convert "$SOURCE" -resize 256x256 "${RESOURCES_DIR}/app-icon.icns" 2>/dev/null && \
+        echo "  ✔  app-icon.icns (via ImageMagick)" || \
+        echo "  ⚠  ImageMagick cannot create .icns — use macOS for proper icns"
+else
+    echo "  ⚠  Skipping .icns (no iconutil or convert)"
+fi
+
+# ── Windows: ICO ────────────────────────────────────────────────────────────
+if command -v convert &>/dev/null; then
+    convert "$SOURCE" -define icon:auto-resize=256,128,64,48,32,16 \
+        "${RESOURCES_DIR}/app-icon.ico"
+    echo "  ✔  app-icon.ico"
+else
+    echo "  ⚠  Skipping .ico (no imagemagick)"
+fi
+
+# ── Linux: PNG copies at common sizes ───────────────────────────────────────
+SIZES=( 256 512 1024 )
+for sz in "${SIZES[@]}"; do
+    if command -v convert &>/dev/null; then
+        convert "$SOURCE" -resize "${sz}x${sz}" "${RESOURCES_DIR}/app-icon-${sz}x${sz}.png"
+    elif command -v sips &>/dev/null; then
+        sips -z "$sz" "$sz" "$SOURCE" --out "${RESOURCES_DIR}/app-icon-${sz}x${sz}.png" &>/dev/null
+    fi
+done
+cp "$SOURCE" "${RESOURCES_DIR}/app-icon@2x.png" 2>/dev/null || true
+echo "  ✔  Linux PNGs (256, 512, 1024)"
+
+echo "Done — all icons in $RESOURCES_DIR"

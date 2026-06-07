@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# bundle-mac — Build a signed .dmg for macOS
+#
+# Usage:
+#   ./script/bundle-mac                      # release .dmg
+#   ./script/bundle-mac -d                   # debug .app (no DMG)
+#   ./script/bundle-mac -o                   # open DMG folder when done
+#   ./script/bundle-mac -i                   # install to /Applications
+#   ./script/bundle-mac x86_64-apple-darwin  # cross-compile for Intel
+#
+# Prerequisites:
+#   brew install imagemagick   (for icon generation)
+#   xcode-select --install     (for codesign, hdiutil)
+#
+# Code signing:
+#   Set these env vars for notarized builds:
+#     MACOS_CERTIFICATE           base64-encoded .p12
+#     MACOS_CERTIFICATE_PASSWORD  password for the .p12
+#     APPLE_NOTARIZATION_KEY      App Store Connect API key
+#     APPLE_NOTARIZATION_KEY_ID   key ID
+#     APPLE_NOTARIZATION_ISSUER_ID  issuer UUID
+#
+#   Without them, the script uses ad-hoc signing (codesign --sign -).
+#   The .dmg works but users must right-click → Open on first launch.
+#   This is the same approach used by Alacritty, Rectangle, VLC, etc.
+
+set -euo pipefail
+
+# ── Flags ───────────────────────────────────────────────────────────────────
+BUILD_FLAG="--release"
+TARGET_DIR="release"
+OPEN_RESULT=false
+LOCAL_INSTALL=false
+CAN_CODE_SIGN=false
+
+IDENTITY="ShellMounter Developer"
+APPLE_TEAM="${APPLE_TEAM:-}"
+
+help_info() {
+  echo "
+Usage: ${0##*/} [options] [arch]
+
+Options:
+  -d    Debug build (faster compile, no DMG)
+  -o    Open the DMG folder (or launch .app in debug mode)
+  -i    Install to /Applications after building
+  -h    Show this help"
+
+  echo "
+Code signing (optional env vars):
+  MACOS_CERTIFICATE           base64 .p12 certificate
+  MACOS_CERTIFICATE_PASSWORD  certificate password
+  APPLE_NOTARIZATION_KEY      App Store Connect API key JSON
+  APPLE_NOTARIZATION_KEY_ID   e.g. 'ABC1234567'
+  APPLE_NOTARIZATION_ISSUER_ID  e.g. 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'"
+}
+
+while getopts 'doih' flag; do
+    case "${flag}" in
+        o) OPEN_RESULT=true ;;
+        d) BUILD_FLAG=""  ; TARGET_DIR="debug" ;;
+        i) LOCAL_INSTALL=true ;;
+        h) help_info; exit 0 ;;
+        *) help_info; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# ── Architecture ────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+VERSION="${VERSION:-0.1.0}"
+
+if [[ $# -gt 0 && -n "$1" ]]; then
+    TARGET="$1"
+else
+    TARGET=$(rustc -vV | grep 'host:' | awk '{print $2}')
+fi
+
+ARCH_SUFFIX=""
+case "$TARGET" in
+    x86_64-apple-darwin)  ARCH_SUFFIX="x86_64" ;;
+    aarch64-apple-darwin) ARCH_SUFFIX="aarch64" ;;
+    *) echo "ERROR: unsupported target $TARGET" ; exit 1 ;;
+esac
+
+# ── Icons ───────────────────────────────────────────────────────────────────
+echo "=== Generating icons ==="
+bash "$SCRIPT_DIR/generate-icons"
+
+# ── Build ───────────────────────────────────────────────────────────────────
+echo "=== Building shellmounter ($TARGET) ==="
+export MACOSX_DEPLOYMENT_TARGET=10.15
+cargo build $BUILD_FLAG --features gui --target "$TARGET"
+
+BIN="target/$TARGET/$TARGET_DIR/shellmounter"
+
+if [[ ! -f "$BIN" ]]; then
+    echo "ERROR: binary not found at $BIN"
+    exit 1
+fi
+
+# ── Create .app bundle ──────────────────────────────────────────────────────
+echo "=== Creating .app bundle ==="
+
+APP_DIR="target/$TARGET/$TARGET_DIR/ShellMounter.app"
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Resources"
+
+# Binary
+cp "$BIN" "$APP_DIR/Contents/MacOS/shellmounter"
+chmod +x "$APP_DIR/Contents/MacOS/shellmounter"
+
+# Icon
+if [[ -f resources/app-icon.icns ]]; then
+    cp resources/app-icon.icns "$APP_DIR/Contents/Resources/"
+else
+    echo "WARNING: no app-icon.icns — run script/generate-icons first"
+fi
+
+# Info.plist with version
+sed "s/\${VERSION}/$VERSION/g" resources/Info.plist > "$APP_DIR/Contents/Info.plist"
+
+echo "Created $APP_DIR"
+
+# ── Code sign ───────────────────────────────────────────────────────────────
+if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
+    echo "=== Code signing with certificate ==="
+    CAN_CODE_SIGN=true
+
+    security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" build.keychain || true
+    security default-keychain -s build.keychain
+    security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" build.keychain
+    security set-keychain-settings build.keychain
+
+    echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/sm-cert.p12
+    security import /tmp/sm-cert.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+    rm -f /tmp/sm-cert.p12
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" build.keychain 2>/dev/null || true
+
+    function cleanup_keychain() {
+        security default-keychain -s login.keychain 2>/dev/null || true
+        security delete-keychain build.keychain 2>/dev/null || true
+    }
+    trap cleanup_keychain EXIT
+
+    /usr/bin/codesign --force --deep --timestamp --options runtime \
+        --sign "$IDENTITY" "$APP_DIR" -v
+else
+    echo "=== Ad-hoc signing (no certificate provided) ==="
+    echo "    DMG will work, but users must right-click → Open on first launch"
+    codesign --force --deep --sign - "$APP_DIR" -v 2>/dev/null || true
+fi
+
+# ── Install or DMG ─────────────────────────────────────────────────────────
+if [[ "$LOCAL_INSTALL" == true ]]; then
+    echo "=== Installing to /Applications ==="
+    rm -rf "/Applications/ShellMounter.app"
+    cp -a "$APP_DIR" "/Applications/ShellMounter.app"
+    echo "Installed: /Applications/ShellMounter.app"
+    [[ "$OPEN_RESULT" == true ]] && open "/Applications/ShellMounter.app"
+
+elif [[ "$TARGET_DIR" == "debug" ]]; then
+    echo "=== Debug build — skipping DMG ==="
+    echo "App bundle: $APP_DIR"
+    [[ "$OPEN_RESULT" == true ]] && open "$APP_DIR"
+
+else
+    echo "=== Creating DMG ==="
+
+    DMG_SRC="target/$TARGET/$TARGET_DIR/dmg"
+    DMG_PATH="target/$TARGET/$TARGET_DIR/ShellMounter-${VERSION}-${ARCH_SUFFIX}.dmg"
+
+    rm -rf "$DMG_SRC"
+    mkdir -p "$DMG_SRC"
+    cp -a "$APP_DIR" "$DMG_SRC/"
+
+    # Symlink to /Applications (standard macOS DMG convention)
+    ln -s /Applications "$DMG_SRC/Applications"
+
+    echo "Packaging DMG: $DMG_PATH"
+    hdiutil create -volname ShellMounter \
+        -srcfolder "$DMG_SRC" \
+        -ov -format UDZO "$DMG_PATH"
+
+    # Remove the symlink so it doesn't interfere with the build dir
+    rm -f "$DMG_SRC/Applications"
+
+    # ── Notarization (only with full credentials) ────────────────────────────
+    if [[ "$CAN_CODE_SIGN" == true && \
+          -n "${APPLE_NOTARIZATION_KEY:-}" && \
+          -n "${APPLE_NOTARIZATION_KEY_ID:-}" && \
+          -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+
+        echo "=== Signing DMG ==="
+        /usr/bin/codesign --force --deep --timestamp --options runtime \
+            --sign "$IDENTITY" "$DMG_PATH" -v
+
+        echo "=== Submitting for notarization (this takes 2-5 min) ==="
+        NOTARY_KEY=$(mktemp)
+        echo "$APPLE_NOTARIZATION_KEY" > "$NOTARY_KEY"
+
+        xcrun notarytool submit --wait \
+            --key "$NOTARY_KEY" \
+            --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+            --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+            "$DMG_PATH"
+
+        rm -f "$NOTARY_KEY"
+
+        echo "=== Stapling notarization ticket ==="
+        xcrun stapler staple "$DMG_PATH"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DMG ready: $DMG_PATH"
+    ls -lh "$DMG_PATH"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    [[ "$OPEN_RESULT" == true ]] && open "$(dirname "$DMG_PATH")"
+fi
+
+echo "Done."

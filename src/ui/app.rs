@@ -1,5 +1,9 @@
 use gpui::prelude::*;
-use gpui::*;
+use gpui::{
+    rgb, rgba, hsla, px, AnyElement, Context, Decorations, ElementId, FontWeight,
+    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement, Render, ScrollWheelEvent, SharedString, Window, WindowControlArea,
+};
 use gpui_component::{h_flex, sidebar::{
     Sidebar, SidebarCollapsible, SidebarFooter, SidebarGroup, SidebarHeader,
     SidebarMenu, SidebarMenuItem, SidebarToggleButton,
@@ -13,7 +17,7 @@ use uuid::Uuid;
 use crate::db::hosts::{AuthMethod, Host, HostDb};
 use crate::ssh::keys::{self, KeyType, SshKey};
 use crate::ssh::port_forward::{ForwardKind, PortForwardManager, PortForwardRule};
-use crate::ssh::session::SshSession;
+use crate::ssh::session::{AuthMethod as SshAuth, SshSession};
 use crate::ssh::snippets::{Snippet, SnippetStore};
 use crate::vault::store::{SecretKind, Vault};
 
@@ -34,7 +38,7 @@ fn avatar_color(id: &str) -> u32 {
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Nav {
     #[default] Hosts,
-    Keychain, PortForwarding, Snippets, KnownHosts, Logs,
+    Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
 }
 
 #[derive(Clone, PartialEq)]
@@ -67,11 +71,72 @@ pub struct AppState {
     available_keys: Vec<SshKey>,
     known_host_entries: Vec<String>,
     log_lines: Vec<String>,
+    // SFTP file browser state
+    sftp: SftpState,
+    // Host search filter
+    search_query: SharedString,
+    /// Focus handle for terminal keyboard input.
+    focus_handle: FocusHandle,
+    /// Terminal font size in px (default 13, range 8-24).
+    terminal_font_size: usize,
+}
+
+#[derive(Clone)]
+struct SftpState {
+    local_path: String,
+    local_entries: Vec<crate::fs::FileEntry>,
+    local_loading: bool,
+    show_hidden: bool,
+    selected_host_id: Option<String>,
+    // Remote SFTP state
+    remote_path: String,
+    remote_entries: Vec<crate::fs::FileEntry>,
+    remote_loading: bool,
+    remote_connected: bool,
+    /// Active SFTP session (wrapped for async sharing).
+    sftp_session: Option<std::sync::Arc<parking_lot::Mutex<russh_sftp::client::SftpSession>>>,
+    /// SSH session handle (needed to keep the connection alive).
+    ssh_session: Option<std::sync::Arc<parking_lot::Mutex<SshSession>>>,
+}
+
+impl Default for SftpState {
+    fn default() -> Self {
+        Self {
+            local_path: dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "/".into()),
+            local_entries: vec![],
+            local_loading: false,
+            show_hidden: false,
+            selected_host_id: None,
+            remote_path: "/".into(),
+            remote_entries: vec![],
+            remote_loading: false,
+            remote_connected: false,
+            sftp_session: None,
+            ssh_session: None,
+        }
+    }
 }
 
 #[derive(Clone)]
 struct TabState {
     id: String, host_label: String, connected: bool,
+    /// Terminal emulator — wrapped in Arc for sharing with SSH recv task.
+    terminal: std::sync::Arc<parking_lot::Mutex<crate::terminal::view::TerminalView>>,
+    /// Active SSH session (present when connected).
+    session: Option<std::sync::Arc<parking_lot::Mutex<SshSession>>>,
+}
+
+impl TabState {
+    fn new(id: String, host_label: String) -> Self {
+        let term = crate::terminal::view::TerminalView::new(
+            crate::terminal::view::TerminalSize::new(120, 40),
+        );
+        Self {
+            id, host_label, connected: false,
+            terminal: std::sync::Arc::new(parking_lot::Mutex::new(term)),
+            session: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -101,7 +166,7 @@ impl Default for KeyGenForm {
 }
 
 impl AppState {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, cx: &mut Context<Self>) -> Self {
         let host_db = Arc::new(HostDb::open(&data_dir).expect("open db"));
         let vault = Arc::new(parking_lot::Mutex::new(Vault::open(&data_dir).expect("open vault")));
         let snippet_store = SnippetStore::open(&data_dir.join("snippets.db")).ok();
@@ -121,9 +186,21 @@ impl AppState {
             host_form: HostForm::default(), key_gen_form: KeyGenForm::default(),
             vault_password: "".into(), available_keys: vec![],
             known_host_entries: known, log_lines: logs,
+            sftp: SftpState::default(),
+            search_query: "".into(),
+            focus_handle: cx.focus_handle(),
+            terminal_font_size: 13,
         };
         if vok { s.load_keys(); }
         s
+    }
+
+    fn load_local_files(&mut self) {
+        self.sftp.local_loading = true;
+        if let Ok(entries) = crate::fs::list_local(std::path::Path::new(&self.sftp.local_path), self.sftp.show_hidden) {
+            self.sftp.local_entries = entries;
+        }
+        self.sftp.local_loading = false;
     }
 
     fn load_known_hosts(data_dir: &Path) -> Vec<String> {
@@ -277,34 +354,155 @@ impl AppState {
     }
 
     fn connect_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
-        if let Some(pos) = self.tabs.iter().position(|t| t.id == host_id) {
-            self.active_tab = pos;
-            cx.notify();
-            return;
-        }
         if let Some(host) = self.hosts.iter().find(|h| h.id == host_id).cloned() {
-            self.tabs.push(TabState { id: host.id.clone(), host_label: host.label.clone(), connected: false });
+            // Always create a new tab with unique ID — allows multiple sessions to same host
+            let unique_tab_id = Uuid::new_v4().to_string();
+            let tab = TabState::new(unique_tab_id.clone(), host.label.clone());
+            self.tabs.push(tab);
             let tab_idx = self.tabs.len() - 1;
             self.active_tab = tab_idx;
             self.status_message = format!("Conectando a {}...", host.label);
 
             let host_id2 = host_id.to_string();
+            let host_label = host.label.clone();
             let data_dir = self.data_dir.clone();
             let hostname = host.hostname.clone();
             let username = host.username.clone();
             let port = host.port;
+            let auth_method = host.auth_method.clone();
+            let vault = self.vault.clone();
+            let terminal = self.tabs[tab_idx].terminal.clone();
+            let tab_id = self.tabs[tab_idx].id.clone();
+
+            // Resolve authentication before spawning
+            let auth = match &auth_method {
+                AuthMethod::Key { vault_id } => {
+                    let vault = vault.lock();
+                    match vault.get(vault_id) {
+                        Ok(data) => {
+                            match serde_json::from_slice::<SshKey>(&data) {
+                                Ok(ssh_key) => {
+                                    match hex::decode(&ssh_key.private_key_bytes) {
+                                        Ok(key_bytes) => Some(SshAuth::Key { key_bytes }),
+                                        Err(e) => {
+                                            self.status_message = format!("Error decodificando key: {e}");
+                                            cx.notify();
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.status_message = format!("Error leyendo key del vault: {e}");
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Key no encontrada en vault: {e}");
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+                AuthMethod::Password { vault_id } => {
+                    let vault = vault.lock();
+                    match vault.get(vault_id) {
+                        Ok(data) => {
+                            match String::from_utf8(data) {
+                                Ok(password) => Some(SshAuth::Password { password }),
+                                Err(e) => {
+                                    self.status_message = format!("Error leyendo password: {e}");
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Password no encontrada en vault: {e}");
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+                AuthMethod::Agent => Some(SshAuth::Agent),
+            };
+
+            let auth = match auth {
+                Some(a) => a,
+                None => return,
+            };
+
             cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
                 let result = SshSession::connect(
-                    &hostname, port, &username, "", &data_dir,
+                    &hostname, port, &username, auth, &data_dir,
                 ).await;
-                entity.update(cx, |this, cx| {
-                    this.tabs.iter_mut().find(|t| t.id == host_id2).map(|t| t.connected = true);
-                    this.status_message = match result {
-                        Ok(_) => "Conectado".into(),
-                        Err(e) => format!("Error: {e}"),
-                    };
-                    cx.notify();
-                }).ok();
+                match result {
+                    Ok(mut session) => {
+                        // Request PTY
+                        let _ = session.request_pty("xterm-256color", 120, 40).await;
+                        let session = std::sync::Arc::new(parking_lot::Mutex::new(session));
+
+                        // Store session in tab
+                        entity.update(cx, |this, cx| {
+                            if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                tab.connected = true;
+                                tab.session = Some(session.clone());
+                            }
+                            this.status_message = format!("Conectado a {}", host_label);
+                            cx.notify();
+                        }).ok();
+
+                        // Spawn recv loop
+                        let term = terminal.clone();
+                        let sess = session.clone();
+                        let entity2 = entity.clone();
+                        cx.spawn(async move |cx| {
+                            loop {
+                                let data = {
+                                    let mut s = sess.lock();
+                                    tokio::time::timeout(
+                                        std::time::Duration::from_millis(100),
+                                        s.recv(),
+                                    ).await.ok().flatten().ok().flatten()
+                                };
+                                match data {
+                                    Some(bytes) => {
+                                        let mut t = term.lock();
+                                        t.write(&bytes);
+                                        drop(t);
+                                        // Only notify UI when data arrives
+                                        let _ = cx.update(|_, _, _| {});
+                                    }
+                                    None => {
+                                        // Check if session is still open
+                                        let open = sess.lock().is_open();
+                                        if !open {
+                                            entity2.update(cx, |this, cx| {
+                                                if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                                    tab.connected = false;
+                                                    tab.session = None;
+                                                }
+                                                this.status_message = "Desconectado".into();
+                                                cx.notify();
+                                            }).ok();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }).detach();
+                    }
+                    Err(e) => {
+                        entity.update(cx, |this, cx| {
+                            if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                tab.connected = false;
+                            }
+                            this.status_message = format!("Error: {e}");
+                            cx.notify();
+                        }).ok();
+                    }
+                }
             }).detach();
             cx.notify();
         }
@@ -325,6 +523,126 @@ impl AppState {
             self.groups = Self::group_hosts(&hosts);
             self.hosts = hosts;
         }
+    }
+
+    /// Connect to a host for SFTP browsing.
+    fn connect_sftp_host(&mut self, host_id: &str, cx: &mut Context<Self>) {
+        let host = match self.hosts.iter().find(|h| h.id == host_id).cloned() {
+            Some(h) => h,
+            None => return,
+        };
+
+        self.sftp.selected_host_id = Some(host_id.to_string());
+        self.sftp.remote_loading = true;
+        self.sftp.remote_path = "/".into();
+        self.status_message = format!("Conectando SFTP a {}...", host.label);
+        cx.notify();
+
+        let host_id2 = host_id.to_string();
+        let hostname = host.hostname.clone();
+        let username = host.username.clone();
+        let port = host.port;
+        let auth_method = host.auth_method.clone();
+        let vault = self.vault.clone();
+        let data_dir = self.data_dir.clone();
+
+        // Resolve auth
+        let auth = match &auth_method {
+            AuthMethod::Key { vault_id } => {
+                let vault = vault.lock();
+                match vault.get(vault_id).ok()
+                    .and_then(|d| serde_json::from_slice::<SshKey>(&d).ok())
+                    .and_then(|k| hex::decode(&k.private_key_bytes).ok())
+                {
+                    Some(key_bytes) => SshAuth::Key { key_bytes },
+                    None => {
+                        self.status_message = "Key no encontrada".into();
+                        self.sftp.remote_loading = false;
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            AuthMethod::Password { vault_id } => {
+                let vault = vault.lock();
+                match vault.get(vault_id).ok().and_then(|d| String::from_utf8(d).ok()) {
+                    Some(password) => SshAuth::Password { password },
+                    None => {
+                        self.status_message = "Password no encontrada".into();
+                        self.sftp.remote_loading = false;
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            AuthMethod::Agent => SshAuth::Agent,
+        };
+
+        cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
+            // Connect SSH
+            let ssh = match SshSession::connect(&hostname, port, &username, auth, &data_dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    entity.update(cx, |this, cx| {
+                        this.status_message = format!("Error SFTP: {e}");
+                        this.sftp.remote_loading = false;
+                        this.sftp.remote_connected = false;
+                        cx.notify();
+                    }).ok();
+                    return;
+                }
+            };
+
+            // Open SFTP
+            let sftp = match ssh.open_sftp().await {
+                Ok(s) => s,
+                Err(e) => {
+                    entity.update(cx, |this, cx| {
+                        this.status_message = format!("Error abriendo SFTP: {e}");
+                        this.sftp.remote_loading = false;
+                        this.sftp.remote_connected = false;
+                        cx.notify();
+                    }).ok();
+                    return;
+                }
+            };
+
+            // List root
+            match crate::ssh::sftp::list(&sftp, "/").await {
+                Ok(entries) => {
+                    let file_entries: Vec<crate::fs::FileEntry> = entries.into_iter().map(|e| {
+                        crate::fs::FileEntry {
+                            name: e.name.clone(),
+                            path: format!("/{}", e.name),
+                            is_dir: e.is_dir,
+                            size: e.size.unwrap_or(0),
+                            modified: String::new(),
+                        }
+                    }).collect();
+
+                    let ssh_arc = std::sync::Arc::new(parking_lot::Mutex::new(ssh));
+                    let sftp_arc = std::sync::Arc::new(parking_lot::Mutex::new(sftp));
+
+                    entity.update(cx, |this, cx| {
+                        this.sftp.remote_entries = file_entries;
+                        this.sftp.remote_loading = false;
+                        this.sftp.remote_connected = true;
+                        this.sftp.sftp_session = Some(sftp_arc);
+                        this.sftp.ssh_session = Some(ssh_arc);
+                        this.status_message = format!("SFTP conectado a {}", hostname);
+                        cx.notify();
+                    }).ok();
+                }
+                Err(e) => {
+                    entity.update(cx, |this, cx| {
+                        this.status_message = format!("Error listando SFTP: {e}");
+                        this.sftp.remote_loading = false;
+                        this.sftp.remote_connected = false;
+                        cx.notify();
+                    }).ok();
+                }
+            }
+        }).detach();
     }
 
     fn save_snippet(&mut self, snippet: &Snippet, cx: &mut Context<Self>) {
@@ -467,7 +785,9 @@ impl Render for AppState {
                         .child(menuitem("Port Fwd", IconName::Network, nav == Nav::PortForwarding, cx, |s, cx| { s.nav = Nav::PortForwarding; cx.notify(); }))
                         .child(menuitem("Snippets", IconName::SquareTerminal, nav == Nav::Snippets, cx, |s, cx| { s.nav = Nav::Snippets; cx.notify(); }))
                         .child(menuitem("Known Hosts", IconName::Globe, nav == Nav::KnownHosts, cx, |s, cx| { s.nav = Nav::KnownHosts; cx.notify(); }))
-                        .child(menuitem("Logs", IconName::Inbox, nav == Nav::Logs, cx, |s, cx| { s.nav = Nav::Logs; cx.notify(); }))))
+                        .child(menuitem("Logs", IconName::Inbox, nav == Nav::Logs, cx, |s, cx| { s.nav = Nav::Logs; cx.notify(); }))
+                        .child(menuitem("Settings", IconName::Settings, nav == Nav::Settings, cx, |s, cx| { s.nav = Nav::Settings; cx.notify(); }))
+                        .child(menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))))
                     .footer(SidebarFooter::new().child(h_flex().gap_2()
                         .child(div().size_2().rounded_full().flex_shrink_0()
                             .bg(if vok { rgb(0x22c55e) } else { rgb(0xef4444) }))
@@ -509,6 +829,8 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
         Nav::PortForwarding => render_port_forward_view(state, cx).into_any_element(),
         Nav::KnownHosts => render_known_hosts_view(state).into_any_element(),
         Nav::Logs => render_logs_view(state, cx).into_any_element(),
+        Nav::Settings => render_settings_view(state, cx).into_any_element(),
+        Nav::Sftp => render_sftp_view(state, cx).into_any_element(),
     }
 }
 
@@ -517,14 +839,27 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
+    let query: String = state.search_query.clone().into();
+    let query_lower = query.to_lowercase();
     v_flex().flex_1().size_full()
         .child(h_flex().h_12().px_4().gap_2().border_b_1().border_color(cx.theme().border)
             .child(btn("+ Nuevo host", true, cx, |s, cx| { s.modal = Some(Modal::HostEditor); cx.notify(); }))
-            .child(div().flex_1())
-            .child(h_flex().h_8().px_3().rounded(cx.theme().radius).border_1().border_color(cx.theme().border)
-                .bg(cx.theme().secondary).items_center().gap_1()
-                .child(Icon::new(IconName::Search).small())
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Buscar..."))))
+            // Search bar
+            .child(h_flex().flex_1().h_8().px_3().rounded(cx.theme().radius).border_1().border_color(cx.theme().border)
+                .bg(cx.theme().secondary).items_center().gap_1())
+            // Quick Connect button
+            .child(div().h_8().px_3().rounded(cx.theme().radius)
+                .bg(cx.theme().primary).text_color(cx.theme().primary_foreground)
+                .flex().items_center().text_sm().cursor_pointer()
+                .hover(|d| d.bg(cx.theme().primary_hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    // Open host editor for quick connect
+                    this.host_form = HostForm::default();
+                    this.host_form.label = "quick".into();
+                    this.modal = Some(Modal::HostEditor);
+                    cx.notify();
+                }))
+                .child("⚡ Quick Connect")))
         .child(div().id("host-scroll").flex_1().overflow_y_scrollbar().p_4()
             .children({
                 let mut items: Vec<AnyElement> = vec![];
@@ -532,10 +867,21 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
                     items.push(empty("Sin hosts", "Agrega tu primer servidor SSH.", IconName::Network, cx).into_any_element());
                 } else {
                     for (gn, hosts) in &state.groups {
+                        // Filter by search query
+                        let filtered: Vec<&Host> = if query_lower.is_empty() {
+                            hosts.iter().collect()
+                        } else {
+                            hosts.iter().filter(|h| {
+                                h.label.to_lowercase().contains(&query_lower) ||
+                                h.hostname.to_lowercase().contains(&query_lower) ||
+                                h.username.to_lowercase().contains(&query_lower)
+                            }).collect()
+                        };
+                        if filtered.is_empty() { continue; }
                         items.push(v_flex().mb_4().gap_1()
                             .child(div().px_1().mb_1().text_xs().font_weight(FontWeight::MEDIUM)
                                 .text_color(cx.theme().muted_foreground).child(gn.clone()))
-                            .children(hosts.iter().map(|h| render_host_card(h, state, cx)))
+                            .children(filtered.iter().map(|h| render_host_card(h, state, cx)))
                             .into_any_element());
                     }
                 }
@@ -544,17 +890,22 @@ fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
 }
 
 fn render_host_card(host: &Host, state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
-    let hid = host.id.clone(); let lbl = host.label.clone();
+    let hid = host.id.clone(); let hid2 = host.id.clone(); let hid3 = host.id.clone();
+    let lbl = host.label.clone();
     let sel = state.selected_host_id.as_deref() == Some(&host.id);
-    let conn = state.tabs.iter().any(|t| t.id == host.id && t.connected);
+    let conn = state.tabs.iter().any(|t| t.connected);
     let ac = avatar_color(&host.id);
     let first: SharedString = lbl.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into()).into();
 
-    h_flex().id(hid.clone()).w_full().px_3().py_2().rounded(cx.theme().radius).gap_3()
+    h_flex().id(format!("host-card-{}", hid)).w_full().px_3().py_2().rounded(cx.theme().radius).gap_3()
         .bg(cx.theme().background).border_1()
         .border_color(if sel { cx.theme().primary } else { cx.theme().border })
         .cursor_pointer().hover(|d| d.bg(cx.theme().accent))
         .on_click(cx.listener(move |this, _, _, cx| { this.connect_host(&hid, cx); }))
+        .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
+            this.selected_host_id = Some(hid2.clone());
+            cx.notify();
+        }))
         .child(div().size_9().rounded(cx.theme().radius).flex().items_center().justify_center()
             .flex_shrink_0().bg(rgb(ac)).text_color(rgb(0xffffff)).font_weight(FontWeight::BOLD).text_sm().child(first))
         .child(v_flex().flex_1().overflow_hidden().gap_0p5()
@@ -675,7 +1026,24 @@ fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
                     h_flex().id(format!("snip-{}", s.id)).w_full().px_3().py_2().rounded(cx.theme().radius).gap_3().bg(cx.theme().background)
                         .border_1().border_color(cx.theme().border).mb_1().cursor_pointer().hover(|d| d.bg(cx.theme().accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.status_message = format!("Snippet: {}", &cmd);
+                            // Send command to active terminal if connected
+                            if let Some(tab) = this.tabs.get(this.active_tab) {
+                                if let Some(ref sess) = tab.session {
+                                    let sess = sess.clone();
+                                    let cmd_with_newline = format!("{}\r", cmd);
+                                    let data = cmd_with_newline.into_bytes();
+                                    cx.spawn(async move |_cx| {
+                                        let mut s = sess.lock();
+                                        let _ = s.send(&data).await;
+                                    }).detach();
+                                    // Also write to the terminal view for visual feedback
+                                    tab.terminal.lock().write(cmd.as_bytes());
+                                    tab.terminal.lock().write(b"\r\n");
+                                    this.status_message = format!("Sent: {}", &cmd);
+                                } else {
+                                    this.status_message = "No active terminal connection".into();
+                                }
+                            }
                             cx.notify();
                         }))
                         .child(Icon::new(IconName::SquareTerminal).small())
@@ -718,20 +1086,209 @@ fn render_logs_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoEl
             .children(state.log_lines.iter().map(|l| div().py_0p5().child(l.clone())).collect::<Vec<_>>()))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Terminal
-// ═══════════════════════════════════════════════════════════════════════════
+/// Map a GPUI KeyDownEvent to terminal byte sequence for SSH PTY.
+fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
+    let key = &event.keystroke.key;
+    let modifiers = &event.keystroke.modifiers;
+
+    // Ctrl+letter → control character (0x01–0x1A)
+    if modifiers.control && key.len() == 1 {
+        let c = key.chars().next().unwrap();
+        if c.is_ascii_uppercase() || c.is_ascii_lowercase() {
+            return vec![c.to_ascii_lowercase() as u8 & 0x1f];
+        }
+    }
+
+    match key.as_str() {
+        "enter" | "return" => vec![b'\r'],
+        "backspace" => vec![0x7f],
+        "tab" => vec![b'\t'],
+        "escape" => vec![0x1b],
+        "space" => vec![b' '],
+        "up" => vec![0x1b, b'[', b'A'],
+        "down" => vec![0x1b, b'[', b'B'],
+        "right" => vec![0x1b, b'[', b'C'],
+        "left" => vec![0x1b, b'[', b'D'],
+        "home" => vec![0x1b, b'[', b'H'],
+        "end" => vec![0x1b, b'[', b'F'],
+        "delete" => vec![0x1b, b'[', b'3', b'~'],
+        "pageup" => vec![0x1b, b'[', b'5', b'~'],
+        "pagedown" => vec![0x1b, b'[', b'6', b'~'],
+        "f1" => vec![0x1b, b'O', b'P'],
+        "f2" => vec![0x1b, b'O', b'Q'],
+        "f3" => vec![0x1b, b'O', b'R'],
+        "f4" => vec![0x1b, b'O', b'S'],
+        "f5" => vec![0x1b, b'[', b'1', b'5', b'~'],
+        "f6" => vec![0x1b, b'[', b'1', b'7', b'~'],
+        "f7" => vec![0x1b, b'[', b'1', b'8', b'~'],
+        "f8" => vec![0x1b, b'[', b'1', b'9', b'~'],
+        "f9" => vec![0x1b, b'[', b'2', b'0', b'~'],
+        "f10" => vec![0x1b, b'[', b'2', b'1', b'~'],
+        "f11" => vec![0x1b, b'[', b'2', b'3', b'~'],
+        "f12" => vec![0x1b, b'[', b'2', b'4', b'~'],
+        // Printable ASCII — send as-is
+        other if other.len() == 1 => {
+            let c = other.chars().next().unwrap();
+            if c.is_ascii() && !c.is_ascii_control() {
+                vec![c as u8]
+            } else {
+                vec![]
+            }
+        }
+        _ => vec![],
+    }
+}
 
 fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
-    v_flex().flex_1().size_full().bg(rgb(0x0d1117))
+    let bg = gpui::rgb(0x0d1117);
+    let fg = gpui::rgb(0xc9d1d9);
+    if state.tabs.is_empty() { return div().into_any_element(); }
+    let tab = &state.tabs[state.active_tab];
+    let terminal = tab.terminal.clone();
+    let session = tab.session.clone();
+    let tab_id = tab.id.clone();
+    let font_size = state.terminal_font_size;
+    let active_tab_idx = state.active_tab;
+    let num_tabs = state.tabs.len();
+
+    v_flex().flex_1().size_full().bg(bg)
         .child(render_tab_bar(state, cx))
-        .child(div().flex_1().flex().items_center().justify_center()
-            .child({
-                let tab = &state.tabs[state.active_tab];
-                div().text_sm().text_color(if tab.connected { rgb(0x22c55e) } else { rgb(0xeab308) })
-                    .child(if tab.connected { format!("Conectado a {}", tab.host_label) }
-                           else { format!("Conectando a {}...", tab.host_label) })
-            }))
+        .child(
+            div().id("terminal-canvas").flex_1().overflow_hidden().bg(bg)
+                .track_focus(&state.focus_handle)
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
+                    let key = &event.keystroke.key;
+                    let mods = &event.keystroke.modifiers;
+                    let ctrl = mods.control;
+                    let shift = mods.shift;
+
+                    // ── App shortcuts (intercepted, NOT sent to terminal) ──
+                    if ctrl && shift {
+                        match key.as_str() {
+                            "w" => {
+                                if this.tabs.len() > 1 {
+                                    let idx = this.active_tab;
+                                    if let Some(tab) = this.tabs.get(idx) {
+                                        if let Some(ref sess) = tab.session {
+                                            let sess = sess.clone();
+                                            cx.spawn(async move |_cx| {
+                                                let s = sess.lock();
+                                                // Session will be dropped after close
+                                                drop(s);
+                                            }).detach();
+                                        }
+                                    }
+                                    this.close_tab(this.active_tab, cx);
+                                }
+                                return;
+                            }
+                            "tab" => {
+                                this.active_tab = (this.active_tab + 1) % this.tabs.len();
+                                cx.notify();
+                                return;
+                            }
+                            "c" => {
+                                // Copy: get selected text from terminal
+                                if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
+                                    let mut t = tab.terminal.lock();
+                                    if let Some(text) = t.get_selection_text() {
+                                        cx.write_to_clipboard(text.into());
+                                        this.status_message = "Copied".into();
+                                    }
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            "v" => {
+                                // Paste: read clipboard and send to terminal
+                                if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
+                                    if let Some(ref sess) = tab.session {
+                                        let text = cx.read_from_clipboard().unwrap_or_default();
+                                        let data = text.into_bytes();
+                                        if !data.is_empty() {
+                                            let sess = sess.clone();
+                                            cx.spawn(async move |_cx| {
+                                                let mut s = sess.lock();
+                                                let _ = s.send(&data).await;
+                                            }).detach();
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+                            "n" => {
+                                // New connection: switch to hosts view
+                                this.nav = Nav::Hosts;
+                                cx.notify();
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Ctrl+Plus/Ctrl+Equal → zoom in
+                    if ctrl && !shift && (key == "+" || key == "=" || key == "plus") {
+                        this.terminal_font_size = (this.terminal_font_size + 1).min(24);
+                        cx.notify();
+                        return;
+                    }
+                    // Ctrl+Minus → zoom out
+                    if ctrl && !shift && key == "-" {
+                        this.terminal_font_size = (this.terminal_font_size - 1).max(8);
+                        cx.notify();
+                        return;
+                    }
+                    // Ctrl+0 → reset zoom
+                    if ctrl && !shift && key == "0" {
+                        this.terminal_font_size = 13;
+                        cx.notify();
+                        return;
+                    }
+
+                    // ── Terminal input (forward to SSH) ──
+                    if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
+                        if let Some(ref sess) = tab.session {
+                            let bytes = key_to_terminal_bytes(event);
+                            if !bytes.is_empty() {
+                                let sess = sess.clone();
+                                let b = bytes;
+                                cx.spawn(async move |_cx| {
+                                    let mut s = sess.lock();
+                                    let _ = s.send(&b).await;
+                                }).detach();
+                            }
+                        }
+                    }
+                }))
+                .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                    // Scroll terminal scrollback
+                    if let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) {
+                        let mut t = tab.terminal.lock();
+                        let delta = event.delta.y;
+                        if delta > 0.0 {
+                            t.scroll((delta / 18.0).ceil() as isize); // ~18px per line
+                        } else if delta < 0.0 {
+                            t.scroll((delta / 18.0).floor() as isize);
+                        }
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
+                    cx.focus_handle(&this.focus_handle);
+                }))
+                .child({
+                    let lines = {
+                        let mut t = terminal.lock();
+                        t.visible_lines().0
+                    };
+                    let fs = font_size;
+                    v_flex().gap_0().p_2().font_family("monospace")
+                        .text_size(px(fs as f32)).text_color(fg)
+                        .children(lines.iter().map(|line| {
+                            div().h(px((fs + 4) as f32)).child(if line.is_empty() { " " } else { line.as_str() })
+                        }))
+                })
+        )
 }
 
 fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
@@ -745,8 +1302,251 @@ fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElem
                 .child(div().text_xs().text_color(rgb(if act { 0xdde3f8 } else { 0x7b84a8 })).child(tab.host_label.clone()))
                 .child(div().id(ElementId::Name(format!("x-{i}").into())).size_4().flex().items_center().justify_center()
                     .rounded_sm().text_xs().text_color(rgb(0x7b84a8)).hover(|d| d.bg(rgb(0x232942)).text_color(rgb(0xdde3f8)))
-                    .cursor_pointer().on_click(cx.listener(move |this, _, _, cx| { this.close_tab(ti, cx); })).child("\u{00D7}"))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| { this.close_tab(ti, cx); }))
+                    .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
+                        this.close_tab(ti, cx);
+                    }))
+                    .child("\u{00D7}"))
         }))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn render_settings_view(_state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
+    use gpui_component::{Theme, ThemeRegistry};
+    let current = Theme::global(cx).theme_name().clone();
+    let themes: Vec<_> = ThemeRegistry::global(cx).sorted_themes().into_iter().cloned().collect();
+
+    v_flex().flex_1().size_full().p_4().gap_2()
+        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).mb_2().child("Themes"))
+        .child(div().text_xs().text_color(cx.theme().muted_foreground).mb_2()
+            .child(format!("{} themes available", themes.len())))
+        .child(div().flex_1().overflow_hidden()
+            .child(v_flex().gap_1().overflow_y_scrollbar()
+                .children(themes.iter().map(|theme| {
+                    let is_active = theme.name.as_ref() == current.as_ref();
+                    let name = theme.name.to_string();
+                    let mode_label = if theme.mode.is_dark() { "dark" } else { "light" };
+                    let mode_is_dark = theme.mode.is_dark();
+                    let theme_clone = (*theme).clone();
+                    let primary_bg = cx.theme().primary;
+                    let primary_fg = cx.theme().primary_foreground;
+                    let muted = cx.theme().muted_foreground;
+                    let radius = cx.theme().radius;
+                    h_flex().id(ElementId::Name(format!("theme-{}", name).into()))
+                        .px_3().py_2().rounded(radius)
+                        .gap_2().items_center().cursor_pointer()
+                        .bg(if is_active { primary_bg } else { cx.theme().secondary })
+                        .text_color(if is_active { primary_fg } else { cx.theme().foreground })
+                        .hover(|d| d.bg(if is_active { primary_bg } else { cx.theme().secondary }))
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            Theme::global_mut(cx).apply_config(&theme_clone);
+                            cx.notify();
+                        }))
+                        .child(div().size_2().rounded_full().flex_shrink_0()
+                            .bg(if is_active { primary_fg } else {
+                                if mode_is_dark { hsla(0.664, 0.866, 0.5, 1.0) } else { hsla(0.123, 0.824, 0.427, 1.0) }
+                            }))
+                        .child(div().flex_1().text_sm().child(name))
+                        .child(div().text_xs().text_color(if is_active { primary_fg } else { muted }).child(mode_label))
+                }))))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SFTP Dual-Pane File Browser
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn render_sftp_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
+    let sftp = &state.sftp;
+    let local_entries = &sftp.local_entries;
+    let host_list = &state.hosts;
+    let selected = sftp.selected_host_id.clone();
+    let remote_connected = sftp.remote_connected;
+    let remote_entries_clone = sftp.remote_entries.clone();
+    let remote_path_display = sftp.remote_path.clone();
+    let remote_loading = sftp.remote_loading;
+    let local_path_display = sftp.local_path.clone();
+
+    v_flex().flex_1().size_full()
+        // Toolbar
+        .child(h_flex().h_10().px_3().gap_2().items_center().border_b_1().border_color(cx.theme().border)
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("SFTP Browser"))
+            .child(div().flex_1())
+            // Hidden files toggle
+            .child(h_flex().gap_1().items_center().px_2().py_1().rounded(cx.theme().radius)
+                .id("toggle-hidden")
+                .bg(cx.theme().secondary).text_xs().text_color(cx.theme().muted_foreground).cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.sftp.show_hidden = !this.sftp.show_hidden;
+                    this.load_local_files();
+                    cx.notify();
+                }))
+                .child(if sftp.show_hidden { "Hide hidden" } else { "Show hidden" })))
+        // Dual pane
+        .child(h_flex().flex_1().min_h_0()
+            // Left pane — Local
+            .child(v_flex().flex_1().min_w_0().border_r_1().border_color(cx.theme().border)
+                .child(h_flex().h_8().px_2().gap_1().items_center().border_b_1().border_color(cx.theme().border).bg(cx.theme().secondary)
+                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child("Local"))
+                    .child(div().flex_1())
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                        .child(local_path_display.clone())))
+                .child(div().flex_1().overflow_hidden()
+                    .child(v_flex().gap_0().overflow_y_scrollbar().h_full()
+                        // Parent dir
+                        .child(render_file_row("..", "", true, cx, |this, cx| {
+                            let parent = std::path::Path::new(&this.sftp.local_path)
+                                .parent().map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "/".into());
+                            this.sftp.local_path = parent;
+                            this.load_local_files();
+                            cx.notify();
+                        }))
+                        .children(local_entries.iter().map(|entry| {
+                            let name = entry.name.clone();
+                            let is_dir = entry.is_dir;
+                            let size = crate::fs::format_size(entry.size);
+                            let entry_path = entry.path.clone();
+                            render_file_row(&name, &size, is_dir, cx, move |this, cx| {
+                                if is_dir {
+                                    this.sftp.local_path = entry_path.clone();
+                                    this.load_local_files();
+                                    cx.notify();
+                                }
+                            })
+                        })))))
+            // Right pane — Remote host picker or file list
+            .child(v_flex().flex_1().min_w_0()
+                .child(h_flex().h_8().px_2().gap_1().items_center().border_b_1().border_color(cx.theme().border).bg(cx.theme().secondary)
+                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(cx.theme().muted_foreground).child("Remote"))
+                    .child(div().flex_1())
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground)
+                        .child(if remote_connected { remote_path_display.clone() } else { selected.clone().unwrap_or_else(|| "Select a host".into()) })))
+                .child(div().flex_1().overflow_hidden()
+                    .child(v_flex().gap_0().overflow_y_scrollbar().h_full()
+                        .when(remote_loading, |d| d.child(div().p_4().text_xs().text_color(cx.theme().muted_foreground).child("Conectando...")))
+                        .when(remote_connected, |d| {
+                            let mut children: Vec<AnyElement> = vec![
+                                // Parent dir
+                                render_file_row("..", "", true, cx, move |this, cx| {
+                                    if let Some(ref sftp) = this.sftp.sftp_session.clone() {
+                                        let sftp = sftp.clone();
+                                        let current = this.sftp.remote_path.clone();
+                                        let parent = std::path::Path::new(&current)
+                                            .parent().map(|p| p.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| "/".into());
+                                        let hostname2 = String::new(); // dummy
+                                        cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
+                                            if let Ok(entries) = crate::ssh::sftp::list(&sftp.lock(), &parent).await {
+                                                let _ = entries;
+                                            }
+                                        }).detach();
+                                    }
+                                }).into_any_element(),
+                            ];
+                            for entry in &remote_entries_clone {
+                                let name = entry.name.clone();
+                                let is_dir = entry.is_dir;
+                                let size = crate::fs::format_size(entry.size);
+                                let entry_path = entry.path.clone();
+                                children.push(render_file_row(&name, &size, is_dir, cx, move |this, cx| {
+                                    if is_dir {
+                                        if let Some(ref sftp) = this.sftp.sftp_session.clone() {
+                                            let sftp2 = sftp.clone();
+                                            let path2 = entry_path.clone();
+                                            this.sftp.remote_path = path2.clone();
+                                            this.sftp.remote_loading = true;
+                                            cx.notify();
+                                            cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
+                                                let result = crate::ssh::sftp::list(&sftp2.lock(), &path2).await;
+                                                entity.update(cx, |this, cx| {
+                                                    this.sftp.remote_loading = false;
+                                                    match result {
+                                                        Ok(entries) => {
+                                                            this.sftp.remote_entries = entries.into_iter().map(|e| {
+                                                                crate::fs::FileEntry {
+                                                                    name: e.name.clone(),
+                                                                    path: format!("{}/{}", path2.trim_end_matches('/'), e.name),
+                                                                    is_dir: e.is_dir,
+                                                                    size: e.size.unwrap_or(0),
+                                                                    modified: String::new(),
+                                                                }
+                                                            }).collect();
+                                                        }
+                                                        Err(e) => {
+                                                            this.status_message = format!("Error SFTP: {e}");
+                                                        }
+                                                    }
+                                                    cx.notify();
+                                                }).ok();
+                                            }).detach();
+                                        }
+                                    }
+                                }).into_any_element());
+                            }
+                            d.children(children)
+                        })
+                        .when(!remote_connected && !remote_loading, |d| {
+                            d.children(host_list.iter().map(|host| {
+                                render_host_item_sftp(host, selected.clone(), cx)
+                            }))
+                        }))))
+}
+
+fn render_host_item_sftp(host: &Host, selected: Option<String>, cx: &mut Context<AppState>) -> impl IntoElement {
+    let hid = host.id.clone();
+    let hlabel = host.label.clone();
+    let hname = host.hostname.clone();
+    let is_sel = selected.as_deref() == Some(hid.as_str());
+    let first_char = host.label.chars().next().unwrap_or('?').to_string();
+    let elem_id = format!("sftp-host-{}", hid);
+    h_flex().id(ElementId::Name(elem_id.into())).px_3().py_2().gap_2().items_center().cursor_pointer()
+        .bg(if is_sel { cx.theme().primary } else { cx.theme().background })
+        .text_color(if is_sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+        .hover(|d| if !is_sel { d.bg(cx.theme().secondary) } else { d })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.connect_sftp_host(&hid, cx);
+        }))
+        .child(div().size_5().rounded(cx.theme().radius).bg(rgb(avatar_color(&host.id))).flex().items_center().justify_center()
+            .child(div().text_xs().text_color(rgb(0xffffff)).child(first_char)))
+        .child(v_flex().flex_1().min_w_0()
+            .child(div().text_sm().child(hlabel))
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(hname)))
+}
+fn render_host_item(host: &Host, selected: Option<String>, cx: &mut Context<AppState>) -> impl IntoElement {
+    h_flex().id(ElementId::Name(elem_id.into())).px_3().py_2().gap_2().items_center().cursor_pointer()
+        .bg(if is_sel { cx.theme().primary } else { cx.theme().background })
+        .text_color(if is_sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+        .hover(|d| if !is_sel { d.bg(cx.theme().secondary) } else { d })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.sftp.selected_host_id = Some(hid.clone());
+            cx.notify();
+        }))
+        .child(div().size_5().rounded(cx.theme().radius).bg(rgb(avatar_color(&host.id))).flex().items_center().justify_center()
+            .child(div().text_xs().text_color(rgb(0xffffff)).child(first_char)))
+        .child(v_flex().flex_1().min_w_0()
+            .child(div().text_sm().child(hlabel))
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(hname)))
+}
+
+fn render_file_row(
+    name: &str, size: &str, is_dir: bool,
+    cx: &mut Context<AppState>,
+    on_click: impl Fn(&mut AppState, &mut Context<AppState>) + 'static,
+) -> impl IntoElement {
+    let name_owned = name.to_string();
+    let size_owned = size.to_string();
+    let icon_color = if is_dir { hsla(0.583, 0.891, 0.58, 1.0) } else { cx.theme().muted_foreground };
+    h_flex().id(ElementId::Name(format!("file-{}", name_owned).into()))
+        .px_2().py_1().gap_2().items_center().cursor_pointer()
+        .hover(|d| d.bg(cx.theme().secondary))
+        .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+        .child(div().text_xs().text_color(icon_color).child(if is_dir { "📁" } else { "📄" }))
+        .child(div().flex_1().min_w_0().text_sm().child(name_owned.clone()))
+        .child(div().w(px(70.)).text_xs().text_color(cx.theme().muted_foreground).child(size_owned.clone()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -925,9 +1725,10 @@ fn render_status_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn run(data_dir: PathBuf) {
-    let app = application().with_assets(gpui_component_assets::Assets);
+    let app = application().with_assets(crate::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        crate::assets::load_themes(cx);
         let data_dir = data_dir.clone();
         cx.open_window(
             WindowOptions {
@@ -946,7 +1747,7 @@ pub fn run(data_dir: PathBuf) {
                 ..Default::default()
             },
             move |window, cx| {
-                let state = cx.new(move |_cx| AppState::new(data_dir.clone()));
+                let state = cx.new(move |cx| AppState::new(data_dir.clone(), cx));
                 cx.new(|cx| Root::new(state, window, cx))
             },
         ).unwrap();

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=ShellMounter
+Comment=Open-source SSH/SFTP/terminal client
+Exec=shellmounter %U
+Terminal=false
+Type=Application
+Icon=shellmounter
+Categories=Development;System;Network;
+Keywords=ssh;sftp;terminal;remote;
+StartupNotify=true
+StartupWMClass=shellmounter
+MimeType=x-scheme-handler/ssh;x-scheme-handler/sftp;
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=shellmounter --new-window

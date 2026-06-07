@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# bundle-linux — Build a .tar.gz release for Linux
+#
+# Usage:
+#   ./script/bundle-linux                    # release .tar.gz
+#   ./script/bundle-linux -d                 # debug build
+#   ./script/bundle-linux --appimage         # also build AppImage
+#   ./script/bundle-linux x86_64-unknown-linux-gnu  # cross-target (musl)
+#
+# Output: target/release/shellmounter-linux-<arch>.tar.gz
+#
+# The archive structure follows the XDG convention:
+#   shellmounter.app/
+#     bin/shellmounter          (stub that execs libexec)
+#     libexec/shellmounter-bin  (the real binary)
+#     lib/                      (bundled shared libs)
+#     share/applications/       (.desktop file)
+#     share/icons/              (app icon PNGs)
+
+set -euo pipefail
+
+# ── Flags ───────────────────────────────────────────────────────────────────
+BUILD_FLAG="--release"
+TARGET_DIR="release"
+BUILD_APPIMAGE=false
+
+help_info() {
+  echo "
+Usage: ${0##*/} [options] [target_triple]
+
+Options:
+  -d           Debug build
+  --appimage   Also generate an AppImage (requires linuxdeploy + appimagetool)
+  -h           Show this help"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d) BUILD_FLAG="" ; TARGET_DIR="debug" ; shift ;;
+        --appimage) BUILD_APPIMAGE=true ; shift ;;
+        -h) help_info ; exit 0 ;;
+        --) shift ; break ;;
+        *) break ;;
+    esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+VERSION="${VERSION:-0.1.0}"
+
+# ── Target ─────────────────────────────────────────────────────────────────
+if [[ $# -gt 0 ]]; then
+    TARGET="$1"
+else
+    TARGET=$(rustc -vV | grep 'host:' | awk '{print $2}')
+fi
+
+ARCH=""
+case "$TARGET" in
+    x86_64-unknown-linux-gnu)   ARCH="x86_64" ;;
+    aarch64-unknown-linux-gnu)  ARCH="aarch64" ;;
+    x86_64-unknown-linux-musl)  ARCH="x86_64-musl" ;;
+    aarch64-unknown-linux-musl) ARCH="aarch64-musl" ;;
+    *) echo "ERROR: unsupported target $TARGET" ; exit 1 ;;
+esac
+
+# ── Icons ───────────────────────────────────────────────────────────────────
+echo "=== Generating icons ==="
+bash "$SCRIPT_DIR/generate-icons"
+
+# ── Build ───────────────────────────────────────────────────────────────────
+echo "=== Building shellmounter ($TARGET) ==="
+
+# ── RUSTFLAGS for linking ───────────────────────────────────────────────────
+# rpath=$ORIGIN/../lib lets the binary find bundled .so files
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld -C link-args=-Wl,--disable-new-dtags,-rpath,\\$ORIGIN/../lib"
+else
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\\$ORIGIN/../lib"
+fi
+
+cargo build $BUILD_FLAG --features gui --target "$TARGET"
+
+BIN="target/$TARGET/$TARGET_DIR/shellmounter"
+if [[ ! -f "$BIN" ]]; then
+    echo "ERROR: binary not found at $BIN"
+    exit 1
+fi
+
+# ── Package ─────────────────────────────────────────────────────────────────
+echo "=== Packaging ==="
+
+# Tmp dir for the package tree
+TEMP=$(mktemp -d)
+PKG="$TEMP/shellmounter.app"
+trap "rm -rf $TEMP" EXIT
+
+mkdir -p "$PKG/bin" "$PKG/libexec" "$PKG/lib"
+mkdir -p "$PKG/share/applications"
+mkdir -p "$PKG/share/icons/hicolor/256x256/apps"
+mkdir -p "$PKG/share/icons/hicolor/512x512/apps"
+mkdir -p "$PKG/share/icons/hicolor/1024x1024/apps"
+
+# ── Binary + stub ───────────────────────────────────────────────────────────
+# Main binary goes to libexec; a stub shell script goes in bin/
+cp "$BIN" "$PKG/libexec/shellmounter-bin"
+chmod +x "$PKG/libexec/shellmounter-bin"
+
+cat > "$PKG/bin/shellmounter" << 'STUB'
+#!/usr/bin/env bash
+# Stub that resolves the real binary relative to itself
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$BIN_DIR/../libexec/shellmounter-bin" "$@"
+STUB
+chmod +x "$PKG/bin/shellmounter"
+
+# ── Shared libs ─────────────────────────────────────────────────────────────
+# Bundle libstdc++ and any non-system .so files
+find_libs() {
+    ldd "$PKG/libexec/shellmounter-bin" 2>/dev/null | \
+        awk '/=>/ {print $3}' | \
+        grep -v -E '^$' | \
+        grep -v -E '/(ld-linux|linux-vdso|libc\.so|libm\.so|libpthread|libdl\.so|libresolv|libgcc_s\.so|libasound|libX|libxcb|libwayland|libfontconfig|libfreetype|libexpat|libuuid|libbsd|libz\.so)' || true
+}
+
+for lib in $(find_libs); do
+    cp -n "$lib" "$PKG/lib/" 2>/dev/null || true
+done
+
+# ── Icons ───────────────────────────────────────────────────────────────────
+for sz in 256 512 1024; do
+    SRC="resources/app-icon-${sz}x${sz}.png"
+    if [[ -f "$SRC" ]]; then
+        cp "$SRC" "$PKG/share/icons/hicolor/${sz}x${sz}/apps/shellmounter.png"
+    fi
+done
+# Fallback: copy 1024px version
+if [[ -f "resources/app-icon@2x.png" ]] && [[ ! -f "$PKG/share/icons/hicolor/512x512/apps/shellmounter.png" ]]; then
+    cp "resources/app-icon@2x.png" "$PKG/share/icons/hicolor/512x512/apps/shellmounter.png"
+fi
+
+# ── .desktop ────────────────────────────────────────────────────────────────
+sed "s/Exec=shellmounter/Exec=shellmounter %U/" resources/shellmounter.desktop \
+    > "$PKG/share/applications/com.shellmounter.app.desktop"
+chmod +x "$PKG/share/applications/com.shellmounter.app.desktop"
+
+# ── Tar it up ────────────────────────────────────────────────────────────────
+ARCHIVE="target/$TARGET_DIR/shellmounter-${VERSION}-linux-${ARCH}.tar.gz"
+rm -f "$ARCHIVE"
+tar -czf "$ARCHIVE" -C "$TEMP" shellmounter.app
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Linux package: $ARCHIVE"
+ls -lh "$ARCHIVE"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "To install locally:"
+echo "  tar xzf $ARCHIVE -C ~/.local/"
+echo "  update-desktop-database ~/.local/share/applications/"
+
+# ── Optional AppImage ───────────────────────────────────────────────────────
+if [[ "$BUILD_APPIMAGE" == true ]]; then
+    if ! command -v linuxdeploy &>/dev/null; then
+        echo "WARNING: linuxdeploy not found. Skipping AppImage."
+        echo "Install: https://github.com/linuxdeploy/linuxdeploy/releases"
+    else
+        echo "=== Building AppImage ==="
+        APPDIR="$TEMP/AppDir"
+        cp -a "$PKG"/* "$APPDIR/"
+        ln -sf bin/shellmounter "$APPDIR/AppRun"
+        cp "$APPDIR/share/icons/hicolor/256x256/apps/shellmounter.png" "$APPDIR/.DirIcon" 2>/dev/null || true
+
+        APPIMAGE="target/$TARGET_DIR/ShellMounter-${VERSION}-${ARCH}.AppImage"
+        linuxdeploy --appdir "$APPDIR" --output appimage -d "$APPDIR/share/applications/com.shellmounter.app.desktop" \
+            -i "$APPDIR/share/icons/hicolor/256x256/apps/shellmounter.png" \
+            --executable "$APPDIR/libexec/shellmounter-bin" \
+            2>&1 || echo "AppImage build failed (may need FUSE or docker)"
+
+        # linuxdeploy puts the AppImage in cwd
+        if [[ -f "ShellMounter-${VERSION}-${ARCH}.AppImage" ]]; then
+            mv "ShellMounter-${VERSION}-${ARCH}.AppImage" "$APPIMAGE"
+            echo "AppImage: $APPIMAGE"
+            ls -lh "$APPIMAGE"
+        fi
+    fi
+fi
+
+echo "Done."

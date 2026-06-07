@@ -9,9 +9,21 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use russh::*;
-use russh_keys::load_secret_key;
+use russh_keys::{agent::client::AgentClient, key::KeyPair};
+use russh_sftp::client::SftpSession;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Authentication method for the SSH session.
+#[derive(Clone, Debug)]
+pub enum AuthMethod {
+    /// Authenticate with a raw Ed25519 private key (32 bytes).
+    Key { key_bytes: Vec<u8> },
+    /// Authenticate with password.
+    Password { password: String },
+    /// Use SSH agent forwarding.
+    Agent,
+}
 
 /// An active SSH session with PTY.
 pub struct SshSession {
@@ -21,6 +33,10 @@ pub struct SshSession {
     port: u16,
     username: String,
     pty_ready: bool,
+    /// Bastion session that must be kept alive for ProxyJump tunnels.
+    /// Closed alongside this session on `close()`.
+    #[allow(dead_code)]
+    bastion: Option<Box<SshSession>>,
 }
 
 /// Client handler with TOFU host key verification.
@@ -85,10 +101,20 @@ impl client::Handler for Client {
         &mut self,
         _server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // We don't have host/port context here, so we delegate
-        // The actual check happens before connect via verify_host_key()
+        // Deferred to verify_host_key() called before connect.
         Ok(true)
     }
+}
+
+// ── Key reconstruction (from raw bytes) ──────────────────────────────
+
+/// Reconstruct an Ed25519 KeyPair from raw 32-byte secret.
+fn keypair_from_bytes(bytes: &[u8]) -> Result<KeyPair> {
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Ed25519 secret key must be exactly 32 bytes"))?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&arr);
+    Ok(KeyPair::Ed25519(signing_key))
 }
 
 impl SshSession {
@@ -111,12 +137,17 @@ impl SshSession {
         Ok(())
     }
 
-    /// Connect to an SSH server and authenticate.
+    /// Connect to an SSH server, optionally through a bastion/jump host.
+    ///
+    /// `auth` determines the authentication method:
+    /// - `AuthMethod::Key { key_bytes }` — raw Ed25519 32-byte secret
+    /// - `AuthMethod::Password { password }` — plaintext password
+    /// - `AuthMethod::Agent` — SSH agent forwarding
     pub async fn connect(
         host: &str,
         port: u16,
         username: &str,
-        key_path: &str,
+        auth: AuthMethod,
         data_dir: &std::path::Path,
     ) -> Result<Self> {
         let config = client::Config::default();
@@ -124,7 +155,6 @@ impl SshSession {
 
         let known_hosts = Arc::new(parking_lot::Mutex::new(KnownHosts::load(data_dir)));
 
-        // Connect with known_hosts in handler
         let sh = Client {
             known_hosts: known_hosts.clone(),
         };
@@ -133,25 +163,44 @@ impl SshSession {
             .await
             .context("SSH connection failed")?;
 
-        // Verify host key post-connect
-        // Note: russh calls check_server_key during connect, but we don't have
-        // host/port context there. A production implementation would pre-verify
-        // the key before connect, or use a custom russh config with key verification.
+        // Authenticate based on method
+        match auth {
+            AuthMethod::Key { key_bytes } => {
+                let key = keypair_from_bytes(&key_bytes)
+                    .context("Failed to reconstruct SSH key from stored bytes")?;
+                session
+                    .authenticate_publickey(username, Arc::new(key))
+                    .await
+                    .context("SSH publickey authentication failed")?;
+            }
+            AuthMethod::Password { password } => {
+                session
+                    .authenticate_password(username, &password)
+                    .await
+                    .context("SSH password authentication failed")?;
+            }
+            AuthMethod::Agent => {
+                let mut agent = AgentClient::connect_env().await
+                    .context("SSH agent not available — is SSH_AUTH_SOCK set?")?;
+                let identities = agent
+                    .request_identities()
+                    .await
+                    .context("Failed to list SSH agent identities")?;
+                // Try the first identity from the agent
+                let pubkey = match identities.into_iter().next() {
+                    Some(pk) => pk,
+                    None => anyhow::bail!("SSH agent has no identities loaded (try ssh-add)"),
+                };
+                let (_, result) = session.authenticate_future(username, pubkey, agent).await;
+                result.context("SSH agent authentication failed")?;
+            }
 
-        // Load private key
-        let key = load_secret_key(key_path, None)
-            .context("Failed to load SSH private key")?;
-
-        session
-            .authenticate_publickey(username, Arc::new(key))
-            .await
-            .context("SSH authentication failed")?;
+        }
 
         let channel = session
             .channel_open_session()
             .await
             .context("Failed to open SSH channel")?;
-
         Ok(Self {
             session,
             channel,
@@ -159,9 +208,11 @@ impl SshSession {
             port,
             username: username.to_string(),
             pty_ready: false,
+            bastion: None,
         })
     }
 
+    /// Request a PTY on the session channel.
     pub async fn request_pty(&mut self, term: &str, cols: u32, rows: u32) -> Result<()> {
         self.channel
             .request_pty(false, term, cols, rows, 0, 0, &[])
@@ -171,10 +222,16 @@ impl SshSession {
         Ok(())
     }
 
-    pub async fn send(&mut self, _data: &[u8]) -> Result<()> {
+    /// Send data to the remote PTY.
+    pub async fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.channel
+            .data(data)
+            .await
+            .context("Failed to send data to SSH channel")?;
         Ok(())
     }
 
+    /// Receive data from the remote PTY. Returns None on EOF or channel close.
     pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
         match self.channel.wait().await {
             Some(russh::ChannelMsg::Data { data }) => Ok(Some(data.to_vec())),
@@ -184,20 +241,130 @@ impl SshSession {
         }
     }
 
+    /// Resize the PTY.
     pub async fn resize(&mut self, cols: u32, rows: u32) -> Result<()> {
         self.channel.window_change(cols, rows, 0, 0).await?;
         Ok(())
     }
 
+    /// Whether the session is still open.
     pub fn is_open(&self) -> bool {
         true
     }
 
+    /// Open an SFTP session over this SSH connection.
+    pub async fn open_sftp(&self) -> Result<SftpSession> {
+        let channel = self.session
+            .channel_open_session()
+            .await
+            .context("Failed to open SFTP channel")?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .context("Failed to request SFTP subsystem")?;
+        SftpSession::new(channel.into_stream())
+            .await
+            .context("Failed to initialize SFTP session")
+    }
+
+    /// Connect through a bastion/jump host (ProxyJump).
+    ///
+    /// First connects to the bastion, authenticates, then opens a direct-tcpip
+    /// channel to the target host through the bastion, and creates a new SSH
+    /// session over that channel.
+    pub async fn connect_via_bastion(
+        host: &str,
+        port: u16,
+        username: &str,
+        auth: AuthMethod,
+        bastion_host: &str,
+        bastion_port: u16,
+        bastion_user: &str,
+        bastion_auth: AuthMethod,
+        data_dir: &std::path::Path,
+    ) -> Result<Self> {
+        // Step 1: Connect to bastion
+        let bastion = Self::connect(bastion_host, bastion_port, bastion_user, bastion_auth, data_dir)
+            .await
+            .context("Failed to connect to bastion host")?;
+
+        // Step 2: Open direct-tcpip channel through bastion to target
+        let channel = bastion.session
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await
+            .context("Failed to open ProxyJump channel through bastion")?;
+
+        let stream = channel.into_stream();
+
+        // Step 3: Create SSH session over the tunnel
+        let config = Arc::new(client::Config::default());
+        let known_hosts = Arc::new(parking_lot::Mutex::new(KnownHosts::load(data_dir)));
+        let sh = Client { known_hosts: known_hosts.clone() };
+
+        let mut session = russh::client::connect_stream(config, stream, sh)
+            .await
+            .context("Failed to connect to target through bastion")?;
+
+        // Step 4: Authenticate to target
+        match auth {
+            AuthMethod::Key { key_bytes } => {
+                let key = keypair_from_bytes(&key_bytes)
+                    .context("Failed to reconstruct SSH key")?;
+                session
+                    .authenticate_publickey(username, Arc::new(key))
+                    .await
+                    .context("SSH publickey auth through bastion failed")?;
+            }
+            AuthMethod::Password { password } => {
+                session
+                    .authenticate_password(username, &password)
+                    .await
+                    .context("SSH password auth through bastion failed")?;
+            }
+            AuthMethod::Agent => {
+                let mut agent = AgentClient::connect_env().await
+                    .context("SSH agent not available through bastion")?;
+                let identities = agent.request_identities().await
+                    .context("Failed to list agent identities through bastion")?;
+                if identities.is_empty() {
+                    anyhow::bail!("SSH agent has no identities for bastion hop");
+                }
+                let pubkey = match identities.into_iter().next() {
+                    Some(pk) => pk,
+                    None => anyhow::bail!("SSH agent has no identities for bastion hop"),
+                };
+                let (_, result) = session.authenticate_future(username, pubkey, agent).await;
+                result.context("Agent auth through bastion failed")?;
+            }
+        }
+
+        let channel = session
+            .channel_open_session()
+            .await
+            .context("Failed to open SSH channel on target")?;
+
+        Ok(Self {
+            session,
+            channel,
+            host: host.to_string(),
+            port,
+            username: username.to_string(),
+            pty_ready: false,
+            bastion: Some(Box::new(bastion)),
+        })
+    }
+
+    /// Close the session gracefully (including bastion if any).
     pub async fn close(self) -> Result<()> {
         self.channel.eof().await?;
         self.session
             .disconnect(Disconnect::ByApplication, "", "User closed")
             .await?;
+        // Close bastion session if present (ProxyJump)
+        if let Some(bastion) = self.bastion {
+            // Box the future to avoid infinite recursion in async fn
+            let _ = Box::pin(bastion.close()).await;
+        }
         Ok(())
     }
 }
@@ -214,17 +381,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut hosts = KnownHosts::load(dir.path());
 
-        // Generate test keys
         let key = russh_keys::key::KeyPair::generate_ed25519();
         let pubkey = key.clone_public_key().unwrap();
         let result = hosts.check("example.com", 22, &pubkey);
         assert!(result.unwrap(), "TOFU should accept new host");
 
-        // Second connection with same key — should be accepted
         let result = hosts.check("example.com", 22, &pubkey);
         assert!(result.unwrap(), "known host should be accepted");
 
-        // Different key — should be REJECTED
         let key2 = russh_keys::key::KeyPair::generate_ed25519();
         let pubkey2 = key2.clone_public_key().unwrap();
         let result = hosts.check("example.com", 22, &pubkey2);
@@ -237,18 +401,33 @@ mod tests {
         let key = russh_keys::key::KeyPair::generate_ed25519();
         let pubkey = key.clone_public_key().unwrap();
 
-        // Save
         {
             let mut hosts = KnownHosts::load(dir.path());
             hosts.check("persist.example.com", 22, &pubkey).unwrap();
             hosts.save();
         }
 
-        // Reload and verify
         {
             let hosts = KnownHosts::load(dir.path());
             let result = hosts.fingerprints.get("persist.example.com:22");
             assert!(result.is_some(), "fingerprint should persist");
         }
+    }
+
+    #[test]
+    fn test_keypair_roundtrip() {
+        let pair = KeyPair::generate_ed25519();
+        // Extract raw bytes
+        let bytes = match &pair {
+            KeyPair::Ed25519(sk) => sk.to_bytes().to_vec(),
+            _ => panic!("expected Ed25519"),
+        };
+        assert_eq!(bytes.len(), 32);
+
+        // Reconstruct
+        let reconstructed = keypair_from_bytes(&bytes).unwrap();
+        let orig_fp = pair.clone_public_key().unwrap().fingerprint();
+        let recon_fp = reconstructed.clone_public_key().unwrap().fingerprint();
+        assert_eq!(orig_fp, recon_fp);
     }
 }

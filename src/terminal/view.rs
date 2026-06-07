@@ -52,6 +52,10 @@ pub struct TerminalView {
     bg_color: (u8, u8, u8),
     cursor_color: (u8, u8, u8),
     selection_color: (u8, u8, u8),
+    /// Cache of last visible lines (avoids recomputing every frame).
+    cached_lines: Vec<String>,
+    /// Set to true when new data is written.
+    dirty: bool,
 }
 
 impl TerminalView {
@@ -76,6 +80,8 @@ impl TerminalView {
             bg_color: bg,
             cursor_color: cursor,
             selection_color: sel,
+            cached_lines: vec![],
+            dirty: true,
         }
     }
 
@@ -85,6 +91,7 @@ impl TerminalView {
         for &byte in data {
             self.parser.advance(&mut *term, byte);
         }
+        self.dirty = true; // Invalidate render cache
     }
 
     /// Resize the terminal grid.
@@ -92,6 +99,8 @@ impl TerminalView {
         self.size = TerminalSize::new(cols, rows);
         let mut term = self.term.lock();
         term.resize(alacritty_terminal::term::test::TermSize::new(cols, rows));
+        self.dirty = true;
+        self.cached_lines.clear();
     }
 
     /// Get the currently selected text.
@@ -124,9 +133,76 @@ impl TerminalView {
             self.scroll_offset = (self.scroll_offset as isize + delta).clamp(0, max as isize) as usize;
         }
     }
-
+    /// Scroll to bottom (follow output).
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    /// Get visible lines from the terminal grid as Vec<String>.
+    /// Returns (lines, cursor_row, cursor_col).
+    /// Cached: only recomputes when `dirty` is true (new data arrived).
+    pub fn visible_lines(&mut self) -> (Vec<String>, usize, usize) {
+        if !self.dirty {
+            // Return cached — terminal hasn't changed since last render
+            return (self.cached_lines.clone(), 0, 0);
+        }
+        let term = self.term.lock();
+        let grid = term.grid();
+        let total = grid.total_lines();
+        let visible = self.size.rows;
+
+        let cursor = grid.cursor.point;
+        let cursor_row = cursor.line.0 as usize;
+        let cursor_col = cursor.column.0 as usize;
+
+        let start = if total > visible {
+            total - visible - self.scroll_offset
+        } else {
+            0
+        };
+
+        let mut lines = Vec::with_capacity(visible);
+        for row_offset in 0..visible {
+            let line_idx = start + row_offset;
+            let mut line_str = String::with_capacity(self.size.cols);
+            for col in 0..self.size.cols {
+                if let Some(cell) = grid.get(line_idx, col) {
+                    let ch = cell.c;
+                    if ch == '\0' || ch == ' ' && col == self.size.cols - 1 && line_str.trim_end().is_empty() {
+                        // Skip trailing empty
+                    } else {
+                        line_str.push(ch);
+                    }
+                } else {
+                    line_str.push(' ');
+                }
+            }
+            lines.push(line_str.trim_end().to_string());
+        }
+        drop(term);
+
+        self.cached_lines = lines.clone();
+        self.dirty = false;
+        (lines, cursor_row, cursor_col)
+    }
+
+    /// Get terminal dimensions.
+    pub fn dimensions(&self) -> TerminalSize {
+        self.size
+    }
+
+    /// Apply a color theme (RGB tuples).
+    pub fn set_theme(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8), cursor: (u8, u8, u8), sel: (u8, u8, u8)) {
+        self.fg_color = fg;
+        self.bg_color = bg;
+        self.cursor_color = cursor;
+        self.selection_color = sel;
+        // Resize to trigger redraw with new bg color
+        let cols = self.size.cols;
+        let rows = self.size.rows;
+        let mut term = self.term.lock();
+        term.resize(alacritty_terminal::term::test::TermSize::new(cols, rows));
+        self.dirty = true;
     }
 
     /// Find text in terminal.

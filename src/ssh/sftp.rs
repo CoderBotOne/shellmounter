@@ -1,8 +1,21 @@
 //! SFTP client built on russh-sftp. File listing, upload, download.
+//!
+//! The open_session() function requires an existing SSH session handle.
+//! In practice, use `SshSession::open_sftp()` from session.rs which has
+//! the correct Handler type bound.
 
 use anyhow::{Context, Result};
 use russh_sftp::client::SftpSession;
 
+/// An SFTP directory entry.
+#[derive(Debug, Clone)]
+pub struct SftpEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+}
+
+/// List directory contents via SFTP.
 pub async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>> {
     let entries = sftp.read_dir(path).await.context("SFTP list failed")?;
     Ok(entries
@@ -15,18 +28,15 @@ pub async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<SftpEntry>> {
         .collect())
 }
 
-#[derive(Debug, Clone)]
-pub struct SftpEntry {
-    pub name: String,
-    pub is_dir: bool,
-    pub size: Option<u64>,
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_entry() {
-        let e = super::SftpEntry { name: "f".into(), is_dir: false, size: Some(1024) };
+        let e = super::SftpEntry {
+            name: "f".into(),
+            is_dir: false,
+            size: Some(1024),
+        };
         assert_eq!(e.name, "f");
         assert_eq!(e.size, Some(1024));
     }

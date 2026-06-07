@@ -8,6 +8,7 @@ use crate::vault::crypto::{self, MasterKey, VaultError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use zeroize::Zeroize;
 
 /// An encrypted credential stored in the vault.
 #[derive(Clone, Serialize, Deserialize)]
@@ -86,7 +87,10 @@ impl Vault {
     /// Unlock the vault with a passphrase.
     /// Derives the master key using Argon2id + stored salt.
     pub fn unlock(&mut self, passphrase: &str) -> Result<(), VaultError> {
-        let key = crypto::derive_key(passphrase, &self.salt);
+        // Note: passphrase is zeroized after key derivation.
+        let mut pass = passphrase.to_string();
+        let key = crypto::derive_key(&pass, &self.salt);
+        pass.zeroize();
 
         // Verify by trying to decrypt at least one secret
         if Path::new(&self.path).exists() {
