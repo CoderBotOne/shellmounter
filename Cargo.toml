@@ -49,12 +49,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 shellexpand = "3"
 
-# GUI (optional) — gpui from git (what gpui-component expects), not crates.io
-gpui = { git = "https://github.com/zed-industries/zed", optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = ["wayland", "x11"] }
-gpui-component = { version = "0.5", optional = true }
-gpui-component-assets = { version = "0.5", optional = true }
-gpui-component-macros = { version = "0.5", optional = true }
+# GUI (optional) — gpui + gpui-component from local path (same gpui commit = no conflict)
+gpui = { git = "https://github.com/zed-industries/zed", rev = "b077f41a9f26ae5ed7fadfea55a501d34afb25de", optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "b077f41a9f26ae5ed7fadfea55a501d34afb25de", optional = true, features = ["wayland", "x11"] }
+gpui-component = { path = "/home/jaff/proyectos/gpui-component/crates/ui", optional = true }
+gpui-component-assets = { path = "/home/jaff/proyectos/gpui-component/crates/assets", optional = true }
 notify-rust = { version = "4", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -63,7 +62,7 @@ zed-font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0
 
 [features]
 default = []
-gui = ["alacritty_terminal", "gpui", "gpui_platform", "gpui-component", "gpui-component-assets", "gpui-component-macros", "notify-rust", "zed-font-kit"]
+gui = ["alacritty_terminal", "gpui", "gpui_platform", "gpui-component", "gpui-component-assets", "notify-rust", "zed-font-kit"]
 
 [profile.release]
 opt-level = 3
