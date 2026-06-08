@@ -1820,8 +1820,8 @@ static TOKIO_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyL
 });
 
 pub fn run(data_dir: PathBuf) {
-    // Enter the Tokio runtime context so cx.spawn() tasks can use tokio::net
-    let _guard = TOKIO_RT.handle().enter();
+    // Warm up the Tokio runtime (kept alive via LazyLock)
+    TOKIO_RT.handle();
     let app = application().with_assets(crate::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
