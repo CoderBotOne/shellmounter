@@ -55,6 +55,9 @@ pub(crate) struct AppState {
     pub(crate) host_db: Arc<HostDb>,
     pub(crate) vault: Arc<parking_lot::Mutex<Vault>>,
     pub(crate) snippet_store: Option<SnippetStore>,
+    /// Snippet editor fields.
+    pub(crate) snippet_label: Entity<InputState>,
+    pub(crate) snippet_command: Entity<InputState>,
     pub(crate) port_forward: PortForwardManager,
     pub(crate) data_dir: PathBuf,
 
@@ -206,6 +209,8 @@ impl AppState {
             status_message: String::new(),
             host_form: HostForm::new(window, cx),
             key_gen_form: KeyGenForm::new(window, cx),
+            snippet_label: cx.new(|cx| InputState::new(window, cx).placeholder("Label")),
+            snippet_command: cx.new(|cx| InputState::new(window, cx).placeholder("Comando")),
             vault_password: cx.new(|cx| InputState::new(window, cx)),
             available_keys: vec![],
             known_host_entries: known, log_lines: logs,
@@ -723,6 +728,16 @@ impl AppState {
         if let Some(ref store) = self.snippet_store {
             match store.save(snippet) {
                 Ok(()) => self.status_message = "Snippet guardado".into(),
+                Err(e) => self.status_message = format!("Error: {e}"),
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn delete_snippet(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(ref store) = self.snippet_store {
+            match store.delete(id) {
+                Ok(()) => self.status_message = "Snippet eliminado".into(),
                 Err(e) => self.status_message = format!("Error: {e}"),
             }
             cx.notify();
