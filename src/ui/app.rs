@@ -36,6 +36,9 @@ const AC: [u32; 6] = [0xef4444, 0x6366f1, 0x22c55e, 0xa855f7, 0xf97316, 0x0ea5e9
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone, Copy, PartialEq, Default)]
+pub(crate) enum HostViewMode { List, #[default] Grid }
+
+#[derive(Clone, Copy, PartialEq, Default)]
 pub(crate) enum Nav {
     #[default] Hosts,
     Terminal, Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
@@ -79,6 +82,8 @@ pub(crate) struct AppState {
     pub(crate) focus_handle: FocusHandle,
     /// Terminal font size in px (default 13, range 8-24).
     pub(crate) terminal_font_size: usize,
+    /// Host view mode: grid or list.
+    pub(crate) host_view_mode: HostViewMode,
 }
 
 #[derive(Clone)]
@@ -207,6 +212,7 @@ impl AppState {
             search_query: "".into(),
             focus_handle: cx.focus_handle(),
             terminal_font_size: 13,
+            host_view_mode: HostViewMode::Grid,
         };
         if vok { s.load_keys(); }
         s
