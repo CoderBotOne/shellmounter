@@ -496,7 +496,7 @@ impl AppState {
                                 tab.session = Some(session.clone());
                             }
                             this.status_message = format!("Conectado a {}", host_label);
-                            // Don't auto-switch to terminal — user clicks tab
+                            cx.notify();
                         }).ok();
 
                         // Spawn recv loop
@@ -1361,16 +1361,8 @@ fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl In
                     cx.notify();
                 }))
                 .child({
-                    let lines = {
-                        let mut t = terminal.lock();
-                        t.visible_lines().0
-                    };
-                    let fs = font_size;
-                    v_flex().gap_0().p_2().font_family("monospace")
-                        .text_size(px(fs as f32)).text_color(fg)
-                        .children(lines.into_iter().map(|line| {
-                            div().h(px((fs + 4) as f32)).child(if line.is_empty() { gpui::SharedString::from(" ") } else { gpui::SharedString::from(line.as_str()) })
-                        }))
+                    div().flex_1().p_4().text_sm().text_color(fg)
+                        .child("Conectado — terminal placeholder")
                 })
                 )
         )
