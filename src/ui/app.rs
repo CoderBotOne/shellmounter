@@ -42,7 +42,7 @@ fn avatar_color(id: &str) -> u32 {
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Nav {
     #[default] Hosts,
-    Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
+    Terminal, Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
 }
 
 #[derive(Clone, PartialEq)]
@@ -407,6 +407,7 @@ impl AppState {
             self.tabs.push(tab);
             let tab_idx = self.tabs.len() - 1;
             self.active_tab = tab_idx;
+            self.nav = Nav::Terminal;
             self.status_message = format!("Conectando a {}...", host.label);
 
             let host_id2 = host_id.to_string();
@@ -878,6 +879,7 @@ impl Render for AppState {
                                 cx.notify();
                             }))))))
                 .child(v_flex().flex_1().h_full().min_w_0()
+                    .when(!self.tabs.is_empty(), |d| d.child(render_tab_bar(self, cx)))
                     .child(render_content(self, cx))
                     .child(render_status_bar(self, cx))))
             .when(self.modal.is_some(), |d| {
@@ -898,7 +900,7 @@ fn menuitem(label: &str, icon: IconName, active: bool, cx: &mut Context<AppState
 
 fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     match state.nav {
-        Nav::Hosts if !state.tabs.is_empty() => render_terminal_area(state, cx).into_any_element(),
+        Nav::Terminal => render_terminal_area(state, cx).into_any_element(),
         Nav::Hosts => render_hosts_view(state, cx).into_any_element(),
         Nav::Keychain => render_keychain_view(state, cx).into_any_element(),
         Nav::Snippets => render_snippets_view(state, cx).into_any_element(),
@@ -1234,19 +1236,59 @@ fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
 fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     if state.tabs.is_empty() { return div().into_any_element(); }
     let tab = &state.tabs[state.active_tab];
+    let terminal = tab.terminal.clone();
     let connected = tab.connected;
+    let session = tab.session.clone();
+    let focus = state.focus_handle.clone();
+
+    let (lines, _cursor_row, _cursor_col) = {
+        let mut term = terminal.lock();
+        term.visible_lines()
+    };
+
     v_flex().flex_1().size_full().bg(gpui::rgb(0x0d1117))
-        .child(div().flex_1().p_4().text_sm().text_color(gpui::rgb(0xc9d1d9))
-            .child(if connected { "Conectado" } else { "Conectando..." }))
-        .into_any_element()
+        .cursor(gpui::CursorStyle::IBeam)
+        .track_focus(&focus)
+        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
+            if let Some(ref sess) = &session {
+                let bytes = key_to_terminal_bytes(event);
+                if !bytes.is_empty() {
+                    let sess = sess.clone();
+                    let data = bytes.clone();
+                    cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
+                        let mut s = sess.lock();
+                        let _ = s.send(&data).await;
+                    }).detach();
+                    if let Some(tab) = this.tabs.get(this.active_tab) {
+                        tab.terminal.lock().write(&bytes);
+                    }
+                }
+                cx.notify();
+            }
+        }))
+        .child(
+            div().flex_1().p_2().overflow_hidden()
+                .font_family("monospace")
+                .text_xs()
+                .text_color(if connected { gpui::rgb(0xc9d1d9) } else { gpui::rgb(0x6e7681) })
+                .children(lines.iter().map(|l| {
+                    div().whitespace_nowrap().child(l.clone())
+                }))
+        ).into_any_element()
 }
+
 fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     div().id("tab-bar").h_9().bg(rgb(0x141929)).border_b_1().border_color(rgb(0x1e2538)).flex().overflow_x_scroll()
         .children(state.tabs.iter().enumerate().map(|(i, tab)| {
             let act = i == state.active_tab; let ti = i;
             h_flex().id(ElementId::Integer(i as u64)).h_full().px_4().gap_2().border_r_1().border_color(rgb(0x1e2538))
                 .when(act, |d| d.bg(rgb(0x0d1117)).border_b_2().border_color(rgb(0x5b7cf6)))
-                .cursor_pointer().on_click(cx.listener(move |this, _, _, cx| { this.active_tab = ti; cx.notify(); }))
+                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+                    this.active_tab = ti;
+                    this.nav = Nav::Terminal;
+                    this.focus_handle.focus(window, cx);
+                    cx.notify();
+                }))
                 .child(div().size_2().rounded_full().bg(rgb(if tab.connected { 0x22c55e } else { 0xeab308 })))
                 .child(div().text_xs().text_color(rgb(if act { 0xdde3f8 } else { 0x7b84a8 })).child(tab.host_label.clone()))
                 .child(div().id(ElementId::Name(format!("x-{i}").into())).size_4().flex().items_center().justify_center()
