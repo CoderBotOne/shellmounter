@@ -519,8 +519,7 @@ impl AppState {
                                         let mut t = term.lock();
                                         t.write(&bytes);
                                         drop(t);
-                                        // Only notify UI when data arrives
-                                        // UI will update on next recv
+                                        entity2.update(cx, |_, cx| cx.notify()).ok();
                                     }
                                     _ => {
                                         // Check if session is still open
