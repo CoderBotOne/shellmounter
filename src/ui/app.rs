@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use anyhow::Context as _;
+
 use crate::db::hosts::{AuthMethod, Host, HostDb};
 use crate::ssh::keys::{self, KeyType, SshKey};
 use crate::ssh::port_forward::{ForwardKind, PortForwardManager, PortForwardRule};
@@ -479,12 +481,12 @@ impl AppState {
 
             cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
                 let result = TOKIO_RT.handle().block_on(async {
-                    SshSession::connect(&hostname, port, &username, auth, &data_dir).await
+                    let mut session = SshSession::connect(&hostname, port, &username, auth, &data_dir).await?;
+                    let _ = session.request_pty("xterm-256color", 120, 40).await;
+                    Ok::<_, anyhow::Error>(session)
                 });
                 match result {
                     Ok(mut session) => {
-                        // Request PTY
-                        let _ = session.request_pty("xterm-256color", 120, 40).await;
                         let session = std::sync::Arc::new(parking_lot::Mutex::new(session));
 
                         // Store session in tab
