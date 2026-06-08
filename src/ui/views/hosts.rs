@@ -4,7 +4,7 @@ use gpui_component::{h_flex, v_flex, scroll::ScrollableElement as _, ActiveTheme
 use gpui::FontWeight;
 use crate::ui::app::{AppState, Modal, Nav};
 use crate::db::hosts::Host;
-use super::widgets::{btn, empty, avatar_color};
+use super::widgets::{btn, empty, avatar_color, status_dot};
 
 
 pub fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
@@ -79,7 +79,7 @@ pub fn render_host_card(host: &Host, state: &AppState, cx: &mut Context<AppState
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(cx.theme().foreground).child(lbl))
             .child(div().text_xs().text_color(cx.theme().muted_foreground)
                 .child(format!("ssh  {}@{}:{}", host.username, host.hostname, host.port))))
-        .when(conn, |d| d.child(div().size_2().rounded_full().flex_shrink_0().bg(rgb(0x22c55e))))
+        .when(conn, |d| d.child(status_dot(true)))
         .child(h_flex().gap_1().ml_2()
             .child(div().id(format!("edit-host-{}", hid_edit)).px_2().py_1().rounded(cx.theme().radius)
                 .bg(cx.theme().secondary).text_xs().cursor_pointer()

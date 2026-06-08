@@ -1,7 +1,10 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
-use gpui::ElementId;
+use gpui_component::{
+    h_flex, v_flex,
+    tab::{Tab, TabBar, TabVariant},
+    ActiveTheme, Icon, IconName, Sizable,
+};
 use crate::ui::app::{AppState, Nav, TabState};
 use crate::ssh::session::SshSession;
 
@@ -103,26 +106,33 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
 }
 
 pub fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
-    div().id("tab-bar").h_9().bg(rgb(0x141929)).border_b_1().border_color(rgb(0x1e2538)).flex().overflow_x_scroll()
+    TabBar::new("sessions")
+        .with_variant(TabVariant::Underline)
+        .selected_index(state.active_tab)
         .children(state.tabs.iter().enumerate().map(|(i, tab)| {
-            let act = i == state.active_tab; let ti = i;
-            h_flex().id(ElementId::Integer(i as u64)).h_full().px_4().gap_2().border_r_1().border_color(rgb(0x1e2538))
-                .when(act, |d| d.bg(rgb(0x0d1117)).border_b_2().border_color(rgb(0x5b7cf6)))
-                .cursor_pointer().on_click(cx.listener(move |this, _, window, cx| {
+            let ti = i;
+            let host_label = tab.host_label.clone();
+            let connected = tab.connected;
+            Tab::new()
+                .label(host_label.clone())
+                .prefix(
+                    div().size_2().rounded_full().flex_shrink_0()
+                        .bg(gpui::rgb(if connected { 0x22c55e } else { 0xeab308 }))
+                )
+                .suffix(
+                    div().id(ElementId::Name(format!("close-tab-{i}").into()))
+                        .cursor_pointer()
+                        .child(Icon::new(IconName::Close).size_3()
+                            .text_color(gpui::rgb(0x7b84a8)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_tab(ti, cx);
+                        }))
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.active_tab = ti;
                     this.nav = Nav::Terminal;
                     this.focus_handle.focus(window, cx);
                     cx.notify();
                 }))
-                .child(div().size_2().rounded_full().bg(rgb(if tab.connected { 0x22c55e } else { 0xeab308 })))
-                .child(div().text_xs().text_color(rgb(if act { 0xdde3f8 } else { 0x7b84a8 })).child(tab.host_label.clone()))
-                .child(div().id(ElementId::Name(format!("x-{i}").into())).size_4().flex().items_center().justify_center()
-                    .rounded_sm().text_xs().text_color(rgb(0x7b84a8)).hover(|d| d.bg(rgb(0x232942)).text_color(rgb(0xdde3f8)))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| { this.close_tab(ti, cx); }))
-                    .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |this, _event: &gpui::MouseDownEvent, _window, cx| {
-                        this.close_tab(ti, cx);
-                    }))
-                    .child("\u{00D7}"))
         }))
 }

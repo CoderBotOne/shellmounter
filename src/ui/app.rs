@@ -736,6 +736,7 @@ impl gpui::Focusable for AppState {
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::ui::views::*;
+        use crate::ui::views::widgets::status_dot;
         let decorations = window.window_decorations();
         let is_csd = matches!(decorations, Decorations::Client { .. });
         let win_ctrls = window.window_controls();
@@ -892,6 +893,7 @@ impl Render for AppState {
 
 fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     use crate::ui::views::*;
+        use crate::ui::views::widgets::status_dot;
     match state.nav {
         Nav::Terminal => terminal::render_terminal_area(state, cx).into_any_element(),
         Nav::Hosts => hosts::render_hosts_view(state, cx).into_any_element(),
