@@ -478,9 +478,9 @@ impl AppState {
             };
 
             cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
-                let result = SshSession::connect(
-                    &hostname, port, &username, auth, &data_dir,
-                ).await;
+                let result = TOKIO_RT.handle().block_on(async {
+                    SshSession::connect(&hostname, port, &username, auth, &data_dir).await
+                });
                 match result {
                     Ok(mut session) => {
                         // Request PTY
@@ -505,10 +505,12 @@ impl AppState {
                             loop {
                                 let data = {
                                     let mut s = sess.lock();
-                                    tokio::time::timeout(
-                                        std::time::Duration::from_millis(100),
-                                        s.recv(),
-                                    ).await
+                                    TOKIO_RT.handle().block_on(async {
+                                        tokio::time::timeout(
+                                            std::time::Duration::from_millis(100),
+                                            s.recv(),
+                                        ).await
+                                    })
                                 };
                                 match data {
                                     Ok(Ok(Some(bytes))) => {
@@ -630,7 +632,9 @@ impl AppState {
 
         cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
             // Connect SSH
-            let ssh = match SshSession::connect(&hostname, port, &username, auth, &data_dir).await {
+            let ssh = match TOKIO_RT.handle().block_on(async {
+                SshSession::connect(&hostname, port, &username, auth, &data_dir).await
+            }) {
                 Ok(s) => s,
                 Err(e) => {
                     entity.update(cx, |this, cx| {
@@ -1805,13 +1809,17 @@ fn render_status_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoE
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub fn run(data_dir: PathBuf) {
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+/// Keep a Tokio runtime alive for SSH connections (russh requires tokio::net::TcpStream).
+static TOKIO_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Tokio runtime");
-    let _guard = tokio_rt.enter();
+        .expect("Tokio runtime")
+});
 
+pub fn run(data_dir: PathBuf) {
+    // Enter the Tokio runtime context so cx.spawn() tasks can use tokio::net
+    let _guard = TOKIO_RT.handle().enter();
     let app = application().with_assets(crate::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
