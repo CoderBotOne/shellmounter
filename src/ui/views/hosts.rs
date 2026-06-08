@@ -2,6 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
     h_flex, v_flex, scroll::ScrollableElement as _, ActiveTheme, Icon, Sizable, IconName,
+    input::Input,
     button::{Button, ButtonVariants as _},
 };
 use gpui::FontWeight;
@@ -10,7 +11,7 @@ use crate::db::hosts::Host;
 use super::widgets::{empty, avatar_color, status_dot};
 
 pub fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
-    let query: String = state.search_query.clone().into();
+    let query = state.search_input.read(cx).value();
     let query_lower = query.to_lowercase();
     let view_mode = state.host_view_mode;
 
@@ -21,8 +22,13 @@ pub fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl I
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.modal = Some(Modal::HostEditor); cx.notify();
                 })))
-            .child(h_flex().flex_1().h_8().px_3().rounded(cx.theme().radius).border_1().border_color(cx.theme().border)
-                .bg(cx.theme().secondary).items_center().gap_1())
+            .child(
+                h_flex().flex_1().h_8().px_2().rounded(cx.theme().radius)
+                    .border_1().border_color(cx.theme().border).bg(cx.theme().secondary)
+                    .items_center().gap_1()
+                    .child(Icon::new(IconName::Search).size_4().text_color(cx.theme().muted_foreground))
+                    .child(div().flex_1().child(Input::new(&state.search_input)))
+            )
             .child(div().flex_1())
             // View mode toggles
             .child(render_view_toggle(state, cx)))

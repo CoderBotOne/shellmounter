@@ -77,7 +77,8 @@ pub(crate) struct AppState {
     // SFTP file browser state
     pub(crate) sftp: SftpState,
     // Host search filter
-    pub(crate) search_query: SharedString,
+    /// Search input entity.
+    pub(crate) search_input: Entity<InputState>,
     /// Focus handle for terminal keyboard input.
     pub(crate) focus_handle: FocusHandle,
     /// Terminal font size in px (default 13, range 8-24).
@@ -209,7 +210,7 @@ impl AppState {
             available_keys: vec![],
             known_host_entries: known, log_lines: logs,
             sftp: SftpState::default(),
-            search_query: "".into(),
+            search_input: cx.new(|cx| InputState::new(window, cx).placeholder("Buscar por IP o label...")),
             focus_handle: cx.focus_handle(),
             terminal_font_size: 13,
             host_view_mode: HostViewMode::Grid,
