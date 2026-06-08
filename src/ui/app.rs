@@ -481,15 +481,20 @@ impl AppState {
 
             cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
                 let result = TOKIO_RT.handle().block_on(async {
+                    log::info!("[ssh] conectando a {}:{}", hostname, port);
                     let mut session = SshSession::connect(&hostname, port, &username, auth, &data_dir).await?;
-                    let _ = session.request_pty("xterm-256color", 120, 40).await;
+                    log::info!("[ssh] conectado, pidiendo PTY");
+                    session.request_pty("xterm-256color", 120, 40).await?;
+                    log::info!("[ssh] PTY ok, iniciando shell");
+                    session.request_shell().await?;
+                    log::info!("[ssh] shell iniciado");
                     Ok::<_, anyhow::Error>(session)
                 });
                 match result {
-                    Ok(mut session) => {
+                    Ok(session) => {
                         let session = std::sync::Arc::new(parking_lot::Mutex::new(session));
 
-                        // Store session in tab
+                        // Store session in tab and notify UI
                         entity.update(cx, |this, cx| {
                             if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
                                 tab.connected = true;
@@ -519,8 +524,20 @@ impl AppState {
                                         let mut t = term.lock();
                                         t.write(&bytes);
                                     }
+                                    // EOF o canal cerrado — salir
+                                    Ok(Ok(None)) => {
+                                        entity2.update(cx, |this, cx| {
+                                            if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                                tab.connected = false;
+                                                tab.session = None;
+                                            }
+                                            this.status_message = "Desconectado".into();
+                                            cx.notify();
+                                        }).ok();
+                                        break;
+                                    }
+                                    // Timeout — comprobar si la sesión sigue abierta
                                     _ => {
-                                        // Check if session is still open
                                         let open = sess.lock().is_open();
                                         if !open {
                                             entity2.update(cx, |this, cx| {

@@ -33,6 +33,7 @@ pub struct SshSession {
     port: u16,
     username: String,
     pty_ready: bool,
+    channel_open: bool,
     /// Bastion session that must be kept alive for ProxyJump tunnels.
     /// Closed alongside this session on `close()`.
     #[allow(dead_code)]
@@ -208,6 +209,7 @@ impl SshSession {
             port,
             username: username.to_string(),
             pty_ready: false,
+            channel_open: true,
             bastion: None,
         })
     }
@@ -219,6 +221,15 @@ impl SshSession {
             .await
             .context("Failed to request PTY")?;
         self.pty_ready = true;
+        Ok(())
+    }
+
+    /// Start an interactive shell on the channel. Must be called after request_pty.
+    pub async fn request_shell(&mut self) -> Result<()> {
+        self.channel
+            .request_shell(false)
+            .await
+            .context("Failed to request shell")?;
         Ok(())
     }
 
@@ -235,8 +246,14 @@ impl SshSession {
     pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
         match self.channel.wait().await {
             Some(russh::ChannelMsg::Data { data }) => Ok(Some(data.to_vec())),
-            Some(russh::ChannelMsg::Eof) | None => Ok(None),
-            Some(russh::ChannelMsg::ExitStatus { .. }) => Ok(None),
+            Some(russh::ChannelMsg::Eof) | None => {
+                self.channel_open = false;
+                Ok(None)
+            }
+            Some(russh::ChannelMsg::ExitStatus { .. }) => {
+                self.channel_open = false;
+                Ok(None)
+            }
             _ => Ok(None),
         }
     }
@@ -247,9 +264,9 @@ impl SshSession {
         Ok(())
     }
 
-    /// Whether the session is still open.
+    /// Whether the session channel is still open.
     pub fn is_open(&self) -> bool {
-        true
+        self.channel_open
     }
 
     /// Open an SFTP session over this SSH connection.
@@ -350,6 +367,7 @@ impl SshSession {
             port,
             username: username.to_string(),
             pty_ready: false,
+            channel_open: true,
             bastion: Some(Box::new(bastion)),
         })
     }
