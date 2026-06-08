@@ -496,7 +496,7 @@ impl AppState {
                                 tab.session = Some(session.clone());
                             }
                             this.status_message = format!("Conectado a {}", host_label);
-                            cx.notify();
+                            // Don't auto-switch to terminal — user clicks tab
                         }).ok();
 
                         // Spawn recv loop
@@ -518,8 +518,6 @@ impl AppState {
                                     Ok(Ok(Some(bytes))) => {
                                         let mut t = term.lock();
                                         t.write(&bytes);
-                                        drop(t);
-                                        entity2.update(cx, |_, cx| cx.notify()).ok();
                                     }
                                     _ => {
                                         // Check if session is still open
