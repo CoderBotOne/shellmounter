@@ -1,4 +1,5 @@
 pub mod app;
+pub mod views;
 pub mod host_tree;
 pub mod terminal_tab;
 pub mod sftp_panel;
