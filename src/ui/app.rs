@@ -518,7 +518,8 @@ impl AppState {
                                     Ok(Ok(Some(bytes))) => {
                                         let mut t = term.lock();
                                         t.write(&bytes);
-                                        cx.notify();
+                                        drop(t);
+                                        entity2.update(cx, |_, cx| cx.notify()).ok();
                                     }
                                     _ => {
                                         // Check if session is still open
