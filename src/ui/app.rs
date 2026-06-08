@@ -504,7 +504,6 @@ impl AppState {
                         let sess = session.clone();
                         let entity2 = entity.clone();
                         cx.spawn(async move |cx| {
-                            let mut last_notify = std::time::Instant::now();
                             loop {
                                 let data = {
                                     let mut s = sess.lock();
@@ -519,12 +518,7 @@ impl AppState {
                                     Ok(Ok(Some(bytes))) => {
                                         let mut t = term.lock();
                                         t.write(&bytes);
-                                        drop(t);
-                                        // Throttle UI updates to avoid render storms
-                                        if last_notify.elapsed() > std::time::Duration::from_millis(50) {
-                                            entity2.update(cx, |_, cx| cx.notify()).ok();
-                                            last_notify = std::time::Instant::now();
-                                        }
+                                        cx.notify();
                                     }
                                     _ => {
                                         // Check if session is still open
