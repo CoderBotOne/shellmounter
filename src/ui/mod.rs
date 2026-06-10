@@ -1,10 +1,3 @@
 pub mod app;
 pub mod views;
-pub mod host_tree;
-pub mod terminal_tab;
-pub mod sftp_panel;
-pub mod snippet_panel;
-pub mod host_editor;
-pub mod vault_unlock;
-pub mod port_forward;
 pub mod theme;

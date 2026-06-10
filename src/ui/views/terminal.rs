@@ -6,15 +6,12 @@ use gpui_component::{
     ActiveTheme, Icon, IconName, Sizable,
 };
 use crate::ui::app::{AppState, Nav, TabState};
-use crate::ssh::session::SshSession;
 use crate::terminal::view::TerminalCell;
-
 
 pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
     let key = &event.keystroke.key;
     let modifiers = &event.keystroke.modifiers;
 
-    // Ctrl+letter → control character (0x01–0x1A)
     if modifiers.control && key.len() == 1 {
         let c = key.chars().next().unwrap();
         if c.is_ascii_uppercase() || c.is_ascii_lowercase() {
@@ -49,7 +46,6 @@ pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
         "f10" => vec![0x1b, b'[', b'2', b'1', b'~'],
         "f11" => vec![0x1b, b'[', b'2', b'3', b'~'],
         "f12" => vec![0x1b, b'[', b'2', b'4', b'~'],
-        // Printable ASCII — send as-is
         other if other.len() == 1 => {
             let c = other.chars().next().unwrap();
             if c.is_ascii() && !c.is_ascii_control() {
@@ -62,7 +58,6 @@ pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
     }
 }
 
-/// Convert a row of TerminalCells into styled spans for GPUI rendering.
 fn render_cell_row(row: &[TerminalCell]) -> Vec<AnyElement> {
     if row.is_empty() {
         return vec![div().child(" ").into_any_element()];
@@ -76,7 +71,6 @@ fn render_cell_row(row: &[TerminalCell]) -> Vec<AnyElement> {
 
     for (i, cell) in row.iter().enumerate().skip(1) {
         if cell.bg != last_bg || cell.fg != last_fg || cell.bold != last_bold {
-            // Flush the run
             let run_text: String = row[run_start..i].iter().map(|c| c.c).collect();
             let bg_color = gpui::rgb((last_bg.0 as u32) << 16 | (last_bg.1 as u32) << 8 | last_bg.2 as u32);
             let fg_color = gpui::rgb((last_fg.0 as u32) << 16 | (last_fg.1 as u32) << 8 | last_fg.2 as u32);
@@ -95,7 +89,6 @@ fn render_cell_row(row: &[TerminalCell]) -> Vec<AnyElement> {
         }
     }
 
-    // Flush final run
     let run_text: String = row[run_start..].iter().map(|c| c.c).collect();
     let bg_color = gpui::rgb((last_bg.0 as u32) << 16 | (last_bg.1 as u32) << 8 | last_bg.2 as u32);
     let fg_color = gpui::rgb((last_fg.0 as u32) << 16 | (last_fg.1 as u32) << 8 | last_fg.2 as u32);
@@ -115,37 +108,32 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
     if state.tabs.is_empty() { return div().into_any_element(); }
     let tab = &state.tabs[state.active_tab];
     let terminal = tab.terminal.clone();
-    let connected = tab.connected;
-    let session = tab.session.clone();
+    let pty = tab.pty.clone();
     let focus = state.focus_handle.clone();
     let font_size = state.terminal_font_size;
 
-    // Use color-aware rendering
     let cell_rows: Vec<Vec<TerminalCell>> = {
         let mut term = terminal.lock();
         let (cells, _, _) = term.visible_cells();
         cells
     };
 
-    // Default bg color for terminal area
     let term_bg = gpui::rgb(0x0d1117_u32);
 
     v_flex().flex_1().size_full().bg(term_bg)
         .cursor(gpui::CursorStyle::IBeam)
         .track_focus(&focus)
         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
-            if let Some(ref sess) = &session {
-                let bytes = key_to_terminal_bytes(event);
-                if !bytes.is_empty() {
-                    let sess = sess.clone();
-                    let data = bytes.clone();
-                    cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
-                        let mut s = sess.lock();
-                        let _ = s.send(&data).await;
-                    }).detach();
-                    if let Some(tab) = this.tabs.get(this.active_tab) {
-                        tab.terminal.lock().write(&bytes);
-                    }
+            let bytes = key_to_terminal_bytes(event);
+            if !bytes.is_empty() {
+                // Send to local PTY
+                if let Some(ref pty) = pty {
+                    let mut p = pty.lock();
+                    let _ = p.write_all(&bytes);
+                }
+                // Also echo locally in terminal emulator
+                if let Some(tab) = this.tabs.get(this.active_tab) {
+                    tab.terminal.lock().write(&bytes);
                 }
                 cx.notify();
             }
@@ -154,7 +142,7 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
             div().flex_1().p_2().overflow_hidden()
                 .font_family("monospace")
                 .text_size(rems((font_size as f32) / 16.0))
-                .text_color(if connected { gpui::rgb(0xc9d1d9) } else { gpui::rgb(0x6e7681) })
+                .text_color(gpui::rgb(0xc9d1d9))
                 .children(cell_rows.iter().map(|row| {
                     h_flex().children(render_cell_row(row))
                 }))
@@ -167,13 +155,13 @@ pub fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl Into
         .selected_index(state.active_tab)
         .children(state.tabs.iter().enumerate().map(|(i, tab)| {
             let ti = i;
-            let host_label = tab.host_label.clone();
-            let connected = tab.connected;
+            let label = tab.label.clone();
+            let has_pty = tab.pty.is_some();
             Tab::new()
-                .label(host_label.clone())
+                .label(label.clone())
                 .prefix(
                     div().size_2().rounded_full().flex_shrink_0()
-                        .bg(gpui::rgb(if connected { 0x22c55e } else { 0xeab308 }))
+                        .bg(gpui::rgb(if has_pty { 0x22c55e } else { 0xeab308 }))
                 )
                 .suffix(
                     div().id(ElementId::Name(format!("close-tab-{i}").into()))

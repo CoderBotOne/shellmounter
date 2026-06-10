@@ -2,11 +2,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
     button::{Button, ButtonVariants as _},
-    badge::Badge,
     h_flex, ActiveTheme,
 };
 use crate::ui::app::AppState;
-
 
 pub fn render_status_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     let theme = cx.theme().clone();
@@ -23,5 +21,5 @@ pub fn render_status_bar(state: &AppState, cx: &mut Context<AppState>) -> impl I
                 }))
         )
         .child(div().text_xs().text_color(theme.muted_foreground)
-            .child(format!("{} hosts · v{}", state.hosts.len(), env!("CARGO_PKG_VERSION"))))
+            .child(format!("v{}", env!("CARGO_PKG_VERSION"))))
 }
