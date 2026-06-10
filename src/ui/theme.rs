@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Terminal themes.
 //!
 //! Loads theme files from ~/.shellmounter/themes/.

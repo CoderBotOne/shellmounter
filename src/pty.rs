@@ -1,5 +1,7 @@
+#![allow(unused)]
+#![allow(dead_code)]
 //! Local PTY — spawns a shell with a pseudo-terminal.
-//! Uses raw libc for the PTY + CommandExt::before_exec for the child process.
+//! Uses raw libc for the PTY + CommandExt::pre_exec for the child process.
 //! No extra crate dependencies.
 
 use std::fs::File;
@@ -36,7 +38,7 @@ impl LocalPty {
         // Spawn child with slave PTY as stdio
         let child = unsafe {
             Command::new(shell)
-                .before_exec(move || {
+                .pre_exec(move || {
                     // Create new session, become session leader
                     if libc::setsid() == -1 {
                         return Err(io::Error::last_os_error());

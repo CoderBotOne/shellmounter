@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Terminal split pane — horizontal and vertical terminal splits.
 //!
 //! Manages a tree of terminal panes that can be split horizontally or vertically.

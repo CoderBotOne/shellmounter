@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Terminal emulation bridge: alacritty_terminal ↔ GPUI.
 // Wraps alacritty_terminal's Term for rendering SSH output in GPUI.
 
@@ -262,7 +263,7 @@ impl TerminalView {
 
     /// Find text in terminal.
     pub fn search_next(&mut self, pattern: &str) -> Option<alacritty_terminal::index::Point> {
-        let mut term = self.term.lock();
+        let term = self.term.lock();
         let search = self
             .search
             .get_or_insert_with(|| RegexSearch::new(pattern).expect("valid regex"));

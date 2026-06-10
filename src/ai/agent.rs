@@ -1,3 +1,5 @@
+#![allow(unused)]
+#![allow(dead_code)]
 use crate::ai::chat::{ChatState, ChatStatus, Message, MessagePart, Role};
 use crate::ai::providers::{AiProvider, ProviderMessage, ProviderContent, ContentPart, StreamChunk, ToolDef, FunctionDef};
 use anyhow::Result;

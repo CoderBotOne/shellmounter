@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Web Preview module — embedded browser via wry.
 //!
 //! Opens a separate native window with a WebView that can load
@@ -40,9 +41,9 @@ pub fn check_port(port: u16) -> bool {
 }
 
 #[cfg(feature = "webview")]
+#[allow(dead_code)]
 mod imp {
-    use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use wry::{WebView, WebViewBuilder};
 
     /// Open a web preview window at the given URL.

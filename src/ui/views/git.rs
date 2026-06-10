@@ -1,3 +1,4 @@
+#![allow(unused)]
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{

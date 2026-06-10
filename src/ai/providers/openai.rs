@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::{AiProvider, ProviderMessage, StreamChunk, TokenUsage, ToolDef};
 use anyhow::{Context, Result};
 use async_trait::async_trait;

@@ -1,3 +1,5 @@
+#![allow(unused)]
+#![allow(dead_code)]
 use super::{AiProvider, ProviderMessage, StreamChunk, TokenUsage, ToolDef};
 use anyhow::Result;
 use async_trait::async_trait;

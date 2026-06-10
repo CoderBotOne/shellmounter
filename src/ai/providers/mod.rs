@@ -1,8 +1,9 @@
+#![allow(unused)]
+#![allow(dead_code)]
 pub mod openai;
 pub mod anthropic;
 pub mod ollama;
-
-use crate::ai::chat::{Message, ChatState};
+use crate::ai::chat::{ChatState, Message};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::pin::Pin;

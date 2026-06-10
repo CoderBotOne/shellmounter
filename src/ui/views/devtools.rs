@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{badge::Badge, button::{Button, ButtonVariants as _}, h_flex, v_flex, ActiveTheme};
