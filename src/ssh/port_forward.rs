@@ -98,6 +98,11 @@ impl PortForwardManager {
         &self.rules
     }
 
+    /// List all rules mutably.
+    pub fn list_mut(&mut self) -> &mut Vec<PortForwardRule> {
+        &mut self.rules
+    }
+
     /// Start a local port forward: localhost:local_port → remote_host:remote_port.
     /// Uses direct TCP (no SSH tunnel). For SSH-tunneled forwarding, use `start_local_forward_ssh`.
     pub async fn start_local_forward(

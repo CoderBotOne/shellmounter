@@ -15,7 +15,33 @@ pub fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl I
     let query_lower = query.to_lowercase();
     let view_mode = state.host_view_mode;
 
+    let broadcast_count = state.broadcast_selected.len();
+
     v_flex().flex_1().size_full()
+        // ── Broadcast bar (visible when hosts selected) ──
+        .when(broadcast_count > 0, |d| d.child(
+            h_flex().h_10().px_4().gap_2().border_b_1().border_color(cx.theme().primary)
+                .bg(cx.theme().primary).opacity(0.15)
+                .items_center()
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(cx.theme().primary)
+                    .child(format!("{} seleccionados", broadcast_count)))
+                .child(div().flex_1())
+                .child(Button::new("broadcast-exec").primary()
+                    .child("Ejecutar comando")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        // Read from broadcast input state
+                        let cmd = this.snippet_command.read(cx).value();
+                        if !cmd.is_empty() {
+                            this.broadcast_command(&cmd, cx);
+                        }
+                    })))
+                .child(Button::new("broadcast-clear").ghost()
+                    .child("Limpiar")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.broadcast_selected.clear();
+                        cx.notify();
+                    })))
+        ))
         // ── Header ──
         .child(h_flex().h_12().px_4().gap_2().border_b_1().border_color(cx.theme().border)
             .child(Button::new("add-host").primary().child("+ Nuevo host")
@@ -194,6 +220,25 @@ pub fn render_host_card(host: &Host, state: &AppState, cx: &mut Context<AppState
             .child(div().text_xs().text_color(cx.theme().muted_foreground)
                 .child(format!("ssh  {}@{}:{}", host.username, host.hostname, host.port))))
         .when(conn, |d| d.child(status_dot(true)))
+        // Broadcast checkbox
+        .child({
+            let hid_cb = host.id.clone();
+            let selected = state.broadcast_selected.contains(&host.id);
+            div().id(format!("cb-{}", hid_cb)).size_5().rounded(cx.theme().radius)
+                .border_1().border_color(cx.theme().border)
+                .bg(if selected { cx.theme().primary } else { cx.theme().background })
+                .flex().items_center().justify_center().cursor_pointer()
+                .text_xs().text_color(if selected { cx.theme().primary_foreground } else { cx.theme().muted_foreground })
+                .child(if selected { "✓" } else { "" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.broadcast_selected.contains(&hid_cb) {
+                        this.broadcast_selected.remove(&hid_cb);
+                    } else {
+                        this.broadcast_selected.insert(hid_cb.clone());
+                    }
+                    cx.notify();
+                }))
+        })
         .child(h_flex().gap_1().ml_2()
             .child(Button::new(format!("edit-host-{}", hid_edit)).ghost()
                 .child("Editar")

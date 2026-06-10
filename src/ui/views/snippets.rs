@@ -56,25 +56,31 @@ pub fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> imp
                 vec![empty("Sin snippets", "Guarda comandos frecuentes para enviar al terminal.", IconName::SquareTerminal, cx).into_any_element()]
             } else {
                 snippets.iter().map(|s| {
-                    let cmd = s.command.clone();
+                    let snippet = s.clone();
                     let sid = s.id.clone();
                     h_flex().id(format!("snip-{}", s.id)).w_full().px_3().py_2().rounded(cx.theme().radius).gap_3()
                         .bg(cx.theme().background).border_1().border_color(cx.theme().border).mb_1()
-                        // Click area: send to terminal
+                        // Click area: send resolved command to terminal
                         .cursor_pointer().hover(|d| d.bg(cx.theme().accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(tab) = this.tabs.get(this.active_tab) {
+                                // Resolve variables if we have an active host in this tab
+                                let host_info = this.hosts.iter()
+                                    .find(|h| h.label == tab.host_label)
+                                    .map(|h| (h.hostname.as_str(), h.username.as_str(), h.port, h.label.as_str()));
+                                let resolved = snippet.resolve(host_info);
                                 if let Some(ref sess) = tab.session {
                                     let sess = sess.clone();
-                                    let cmd_with_newline = format!("{}\r", cmd);
+                                    let cmd_with_newline = format!("{}\r", resolved);
                                     let data = cmd_with_newline.into_bytes();
+                                    let cmd_display = resolved.clone();
                                     cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
                                         let mut s = sess.lock();
                                         let _ = s.send(&data).await;
                                     }).detach();
-                                    tab.terminal.lock().write(cmd.as_bytes());
+                                    tab.terminal.lock().write(resolved.as_bytes());
                                     tab.terminal.lock().write(b"\r\n");
-                                    this.status_message = format!("Sent: {}", &cmd);
+                                    this.status_message = format!("Sent: {}", cmd_display);
                                 } else {
                                     this.status_message = "Sin conexión activa".into();
                                 }

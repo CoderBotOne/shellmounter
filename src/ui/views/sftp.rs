@@ -34,6 +34,12 @@ pub fn render_sftp_view(state: &AppState, cx: &mut Context<AppState>) -> impl In
                 }))
                 .child(if sftp.show_hidden { "Hide hidden" } else { "Show hidden" })))
         // Dual pane
+        // Progress indicator
+        .when(sftp.local_loading || sftp.remote_loading, |d| d.child(
+            h_flex().h_1().w_full()
+                .bg(cx.theme().primary)
+                .child(div().h_full().w(px(200.)).bg(cx.theme().primary))
+        ))
         .child(h_flex().flex_1().min_h_0()
             // Left pane — Local
             .child(v_flex().flex_1().min_w_0().border_r_1().border_color(cx.theme().border)

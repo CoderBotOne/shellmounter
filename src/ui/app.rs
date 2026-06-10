@@ -25,6 +25,13 @@ use crate::ssh::session::{AuthMethod as SshAuth, SshSession};
 use crate::ssh::snippets::{Snippet, SnippetStore};
 use crate::vault::store::{SecretKind, Vault};
 
+use crate::ai::chat::{ChatState, ChatStatus};
+use crate::ai::ui::chat_view::render_chat_view;
+use crate::ai::ui::input_bar::{render_input_bar, InputMode};
+use crate::ai::ui::mini_window::render_mini_window;
+use crate::ai::agent::AgentRunner;
+use crate::ai::providers::openai::OpenAiProvider;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Colores de avatar
 // ═══════════════════════════════════════════════════════════════════════════
@@ -42,6 +49,7 @@ pub(crate) enum HostViewMode { List, #[default] Grid }
 pub(crate) enum Nav {
     #[default] Hosts,
     Terminal, Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
+    Termia,
 }
 
 #[derive(Clone, PartialEq)]
@@ -88,6 +96,21 @@ pub(crate) struct AppState {
     pub(crate) terminal_font_size: usize,
     /// Host view mode: grid or list.
     pub(crate) host_view_mode: HostViewMode,
+    // Port forwarding form
+    pub(crate) pf_label: Entity<InputState>,
+    pub(crate) pf_local_port: Entity<InputState>,
+    pub(crate) pf_remote_host: Entity<InputState>,
+    pub(crate) pf_remote_port: Entity<InputState>,
+    pub(crate) pf_kind: String,
+    // Command broadcast: selected host IDs for multi-exec
+    pub(crate) broadcast_selected: std::collections::HashSet<String>,
+    // Current terminal font family
+    pub(crate) terminal_font_family: String,
+    // Termia AI
+    pub(crate) chat_state: ChatState,
+    pub(crate) ai_mini_visible: bool,
+    pub(crate) ai_api_key: String,
+    pub(crate) ai_model: String,
 }
 
 #[derive(Clone)]
@@ -133,6 +156,8 @@ pub(crate) struct TabState {
     pub(crate) terminal: std::sync::Arc<parking_lot::Mutex<crate::terminal::view::TerminalView>>,
     /// Active SSH session (present when connected).
     pub(crate) session: Option<std::sync::Arc<parking_lot::Mutex<SshSession>>>,
+    /// Split pane layout for this tab.
+    pub(crate) layout: crate::terminal::split::TerminalLayout,
 }
 
 impl TabState {
@@ -140,10 +165,16 @@ impl TabState {
         let term = crate::terminal::view::TerminalView::new(
             crate::terminal::view::TerminalSize::new(120, 40),
         );
+        let mut layout = crate::terminal::split::TerminalLayout::default();
+        // Set the root pane to match this tab
+        if let crate::terminal::split::TerminalPane::Leaf { ref mut host_label, .. } = layout.root {
+            *host_label = id.clone();
+        }
         Self {
             id, host_label, connected: false,
             terminal: std::sync::Arc::new(parking_lot::Mutex::new(term)),
             session: None,
+            layout,
         }
     }
 }
@@ -219,8 +250,21 @@ impl AppState {
             focus_handle: cx.focus_handle(),
             terminal_font_size: 13,
             host_view_mode: HostViewMode::Grid,
+            pf_label: cx.new(|cx| InputState::new(window, cx).placeholder("Label")),
+            pf_local_port: cx.new(|cx| InputState::new(window, cx).placeholder("8080").default_value("8080")),
+            pf_remote_host: cx.new(|cx| InputState::new(window, cx).placeholder("localhost")),
+            pf_remote_port: cx.new(|cx| InputState::new(window, cx).placeholder("80").default_value("80")),
+            pf_kind: "Local".into(),
+            broadcast_selected: Default::default(),
+            terminal_font_family: "monospace".into(),
+            chat_state: ChatState::new(),
+            ai_mini_visible: false,
+            ai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            ai_model: std::env::var("TERMIA_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
         };
         if vok { s.load_keys(); }
+        s.restore_session();
+        if !s.tabs.is_empty() { s.nav = Nav::Terminal; s.active_tab = 0; }
         s
     }
 
@@ -253,12 +297,27 @@ impl AppState {
         vec!["No hay logs todavía.".into()]
     }
 
+    /// Group hosts into a flat list with hierarchical prefixes.
+    /// Groups with '/' create nested virtual folders (e.g. "Prod/US" -> "Prod" then "Prod/US").
     pub(crate) fn group_hosts(hosts: &[Host]) -> Vec<(String, Vec<Host>)> {
         let mut map: std::collections::BTreeMap<String, Vec<Host>> = Default::default();
         let mut u = vec![];
         for h in hosts {
-            if let Some(ref g) = h.group_name { map.entry(g.clone()).or_default().push(h.clone()); }
-            else { u.push(h.clone()); }
+            if let Some(ref g) = h.group_name {
+                // Split hierarchical groups: "Prod/US" -> entries for "Prod" + "Prod/US"
+                let parts: Vec<&str> = g.split('/').collect();
+                if parts.len() > 1 {
+                    // Add to each level: "Prod", "Prod/US"
+                    let mut prefix = String::new();
+                    for part in parts {
+                        if !prefix.is_empty() { prefix.push('/'); }
+                        prefix.push_str(part);
+                        map.entry(prefix.clone()).or_default().push(h.clone());
+                    }
+                } else {
+                    map.entry(g.clone()).or_default().push(h.clone());
+                }
+            } else { u.push(h.clone()); }
         }
         let mut r = vec![];
         if !u.is_empty() { r.push(("Hosts".into(), u)); }
@@ -589,6 +648,40 @@ impl AppState {
         }
     }
 
+    pub(crate) fn send_ai_message(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.ai_api_key.is_empty() {
+            self.chat_state.error = Some("OPENAI_API_KEY not set".into());
+            cx.notify();
+            return;
+        }
+
+        let api_key = self.ai_api_key.clone();
+        let model = self.ai_model.clone();
+        let data_dir = self.data_dir.clone();
+        self.chat_state.status = ChatStatus::Streaming;
+        cx.notify();
+
+        cx.spawn(async move |entity: gpui::WeakEntity<AppState>, cx| {
+            let result = TOKIO_RT.handle().block_on(async {
+                let provider = std::sync::Arc::new(OpenAiProvider::new(api_key, None));
+                let runner = AgentRunner::new(provider, model, data_dir);
+                let state = entity.read_with(cx, |this, _| this.chat_state.clone()).ok().unwrap_or_default();
+                runner.run(state, message).await
+            });
+
+            entity.update(cx, |this, cx| {
+                match result {
+                    Ok(state) => { this.chat_state = state; }
+                    Err(e) => {
+                        this.chat_state.status = ChatStatus::Error;
+                        this.chat_state.error = Some(format!("{e}"));
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
     pub(crate) fn refresh_hosts(&mut self) {
         if let Ok(hosts) = self.host_db.list_hosts(None) {
             self.groups = Self::group_hosts(&hosts);
@@ -743,6 +836,64 @@ impl AppState {
             cx.notify();
         }
     }
+
+    /// Save open tabs to a JSON file for session restore.
+    /// Send a command to all selected broadcast hosts.
+    pub(crate) fn broadcast_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        if self.broadcast_selected.is_empty() {
+            self.status_message = "Selecciona hosts para broadcast".into();
+            cx.notify();
+            return;
+        }
+        let cmd_bytes = format!("{}
+", command).into_bytes();
+        for host_id in self.broadcast_selected.clone() {
+            // Find tab that has this host connected
+            if let Some(tab) = self.tabs.iter().find(|t| {
+                self.hosts.iter().any(|h| h.id == host_id && h.label == t.host_label)
+            }) {
+                if let Some(ref sess) = tab.session {
+                    let sess = sess.clone();
+                    let data = cmd_bytes.clone();
+                    cx.spawn(async move |_entity: gpui::WeakEntity<AppState>, _cx| {
+                        let mut s = sess.lock();
+                        let _ = s.send(&data).await;
+                    }).detach();
+                    tab.terminal.lock().write(&cmd_bytes);
+                }
+            }
+        }
+        self.status_message = format!("Broadcast a {} hosts", self.broadcast_selected.len());
+        cx.notify();
+    }
+
+    pub(crate) fn save_session(&self) {
+        let path = self.data_dir.join("session.json");
+        let data: Vec<serde_json::Value> = self.tabs.iter().map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "host_label": t.host_label,
+                "connected": t.connected,
+            })
+        }).collect();
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Restore session from saved JSON file.
+    pub(crate) fn restore_session(&mut self) {
+        let path = self.data_dir.join("session.json");
+        if let Ok(json) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                for entry in data {
+                    let host_label = entry["host_label"].as_str().unwrap_or("unknown").to_string();
+                    let tab = TabState::new(Uuid::new_v4().to_string(), host_label);
+                    self.tabs.push(tab);
+                }
+            }
+        }
+    }
 }
 
 impl gpui::Focusable for AppState {
@@ -884,7 +1035,8 @@ impl Render for AppState {
                         .child(widgets::menuitem("Known Hosts", IconName::Globe, nav == Nav::KnownHosts, cx, |s, cx| { s.nav = Nav::KnownHosts; cx.notify(); }))
                         .child(widgets::menuitem("Logs", IconName::Inbox, nav == Nav::Logs, cx, |s, cx| { s.nav = Nav::Logs; cx.notify(); }))
                         .child(widgets::menuitem("Settings", IconName::Settings, nav == Nav::Settings, cx, |s, cx| { s.nav = Nav::Settings; cx.notify(); }))
-                        .child(widgets::menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))))
+                        .child(widgets::menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))
+                        .child(widgets::menuitem("Termia", IconName::Search, nav == Nav::Termia, cx, |s, cx| { s.nav = Nav::Termia; cx.notify(); }))))
                     .footer(SidebarFooter::new().child(h_flex().gap_2()
                         .child(div().size_2().rounded_full().flex_shrink_0()
                             .bg(if vok { rgb(0x22c55e) } else { rgb(0xef4444) }))
@@ -926,7 +1078,16 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
         Nav::Logs => logs::render_logs_view(state, cx).into_any_element(),
         Nav::Settings => settings::render_settings_view(state, cx).into_any_element(),
         Nav::Sftp => sftp::render_sftp_view(state, cx).into_any_element(),
+        Nav::Termia => render_termia_view(state, cx),
     }
+}
+
+fn render_termia_view(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
+    let theme = cx.theme().clone();
+    v_flex().size_full().bg(theme.background)
+        .child(render_chat_view(&state.chat_state, cx))
+        .child(render_input_bar(InputMode::Ai, "".to_string(), |_, _, _| {}, cx))
+        .into_any_element()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

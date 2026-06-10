@@ -21,6 +21,28 @@ pub struct Snippet {
     pub updated_at: i64,
 }
 
+impl Snippet {
+    /// Resolve template variables in the command string.
+    ///
+    /// Supported placeholders:
+    ///   `${host}`   — remote hostname
+    ///   `${user}`   — remote username
+    ///   `${port}`   — remote port
+    ///   `${label}`  — host label
+    ///
+    /// If `host` is `None`, placeholders are left as-is.
+    pub fn resolve(&self, host: Option<(&str, &str, u16, &str)>) -> String {
+        let mut cmd = self.command.clone();
+        if let Some((hostname, username, port, label)) = host {
+            cmd = cmd.replace("${host}", hostname);
+            cmd = cmd.replace("${user}", username);
+            cmd = cmd.replace("${port}", &port.to_string());
+            cmd = cmd.replace("${label}", label);
+        }
+        cmd
+    }
+}
+
 /// Snippet store backed by SQLite.
 pub struct SnippetStore {
     conn: Connection,

@@ -7,6 +7,7 @@ use gpui_component::{
 };
 use crate::ui::app::{AppState, Nav, TabState};
 use crate::ssh::session::SshSession;
+use crate::terminal::view::TerminalCell;
 
 
 pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
@@ -61,6 +62,55 @@ pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
     }
 }
 
+/// Convert a row of TerminalCells into styled spans for GPUI rendering.
+fn render_cell_row(row: &[TerminalCell]) -> Vec<AnyElement> {
+    if row.is_empty() {
+        return vec![div().child(" ").into_any_element()];
+    }
+
+    let mut spans: Vec<AnyElement> = Vec::new();
+    let mut run_start = 0;
+    let mut last_bg = row[0].bg;
+    let mut last_fg = row[0].fg;
+    let mut last_bold = row[0].bold;
+
+    for (i, cell) in row.iter().enumerate().skip(1) {
+        if cell.bg != last_bg || cell.fg != last_fg || cell.bold != last_bold {
+            // Flush the run
+            let run_text: String = row[run_start..i].iter().map(|c| c.c).collect();
+            let bg_color = gpui::rgb((last_bg.0 as u32) << 16 | (last_bg.1 as u32) << 8 | last_bg.2 as u32);
+            let fg_color = gpui::rgb((last_fg.0 as u32) << 16 | (last_fg.1 as u32) << 8 | last_fg.2 as u32);
+            let mut span = div()
+                .bg(bg_color)
+                .text_color(fg_color)
+                .whitespace_nowrap();
+            if last_bold {
+                span = span.font_weight(gpui::FontWeight::BOLD);
+            }
+            spans.push(span.child(run_text).into_any_element());
+            run_start = i;
+            last_bg = cell.bg;
+            last_fg = cell.fg;
+            last_bold = cell.bold;
+        }
+    }
+
+    // Flush final run
+    let run_text: String = row[run_start..].iter().map(|c| c.c).collect();
+    let bg_color = gpui::rgb((last_bg.0 as u32) << 16 | (last_bg.1 as u32) << 8 | last_bg.2 as u32);
+    let fg_color = gpui::rgb((last_fg.0 as u32) << 16 | (last_fg.1 as u32) << 8 | last_fg.2 as u32);
+    let mut span = div()
+        .bg(bg_color)
+        .text_color(fg_color)
+        .whitespace_nowrap();
+    if last_bold {
+        span = span.font_weight(gpui::FontWeight::BOLD);
+    }
+    spans.push(span.child(run_text).into_any_element());
+
+    spans
+}
+
 pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     if state.tabs.is_empty() { return div().into_any_element(); }
     let tab = &state.tabs[state.active_tab];
@@ -68,13 +118,19 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
     let connected = tab.connected;
     let session = tab.session.clone();
     let focus = state.focus_handle.clone();
+    let font_size = state.terminal_font_size;
 
-    let (lines, _cursor_row, _cursor_col) = {
+    // Use color-aware rendering
+    let cell_rows: Vec<Vec<TerminalCell>> = {
         let mut term = terminal.lock();
-        term.visible_lines()
+        let (cells, _, _) = term.visible_cells();
+        cells
     };
 
-    v_flex().flex_1().size_full().bg(gpui::rgb(0x0d1117))
+    // Default bg color for terminal area
+    let term_bg = gpui::rgb(0x0d1117_u32);
+
+    v_flex().flex_1().size_full().bg(term_bg)
         .cursor(gpui::CursorStyle::IBeam)
         .track_focus(&focus)
         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
@@ -97,10 +153,10 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
         .child(
             div().flex_1().p_2().overflow_hidden()
                 .font_family("monospace")
-                .text_xs()
+                .text_size(rems((font_size as f32) / 16.0))
                 .text_color(if connected { gpui::rgb(0xc9d1d9) } else { gpui::rgb(0x6e7681) })
-                .children(lines.iter().map(|l| {
-                    div().whitespace_nowrap().child(l.clone())
+                .children(cell_rows.iter().map(|row| {
+                    h_flex().children(render_cell_row(row))
                 }))
         ).into_any_element()
 }

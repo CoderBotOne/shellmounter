@@ -19,6 +19,10 @@ mod update;
 mod vault;
 mod fs;
 
+// AI module — Termia: terminal + IA integration
+#[cfg(feature = "gui")]
+mod ai;
+
 // UI is optional — requires GPUI (not available on all platforms)
 #[cfg(feature = "gui")]
 mod ui;
