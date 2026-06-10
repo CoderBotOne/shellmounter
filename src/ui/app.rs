@@ -186,8 +186,10 @@ impl AppState {
                             Ok(0) => {
                                 if !p.is_alive() { break; }
                                 drop(p);
-                                // Yield before polling again
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                // Yield before polling again (50ms).
+                                // Not using tokio::time::sleep because GPUI's
+                                // executor isn't always a Tokio runtime.
+                                std::thread::sleep(std::time::Duration::from_millis(50));
                                 continue;
                             }
                             Ok(n) => n,
