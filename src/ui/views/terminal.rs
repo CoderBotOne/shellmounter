@@ -1,12 +1,12 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
-    h_flex, v_flex,
-    tab::{Tab, TabBar, TabVariant},
-    ActiveTheme, Icon, IconName, Sizable,
+    v_flex,
+    button::{Button, ButtonVariants as _},
+    tab::{Tab, TabBar},
+    IconName, Sizable,
 };
-use crate::ui::app::{AppState, Nav, TabState};
-use crate::ssh::session::SshSession;
+use crate::ui::app::{AppState, Nav};
 
 
 pub fn key_to_terminal_bytes(event: &gpui::KeyDownEvent) -> Vec<u8> {
@@ -107,32 +107,31 @@ pub fn render_terminal_area(state: &AppState, cx: &mut Context<AppState>) -> imp
 
 pub fn render_tab_bar(state: &AppState, cx: &mut Context<AppState>) -> impl IntoElement {
     TabBar::new("sessions")
-        .with_variant(TabVariant::Underline)
+        .underline()
         .selected_index(state.active_tab)
+        .on_click(cx.listener(|this, ix: &usize, window, cx| {
+            this.active_tab = *ix;
+            this.nav = Nav::Terminal;
+            this.focus_handle.focus(window, cx);
+            cx.notify();
+        }))
         .children(state.tabs.iter().enumerate().map(|(i, tab)| {
-            let ti = i;
-            let host_label = tab.host_label.clone();
             let connected = tab.connected;
             Tab::new()
-                .label(host_label.clone())
+                .px_2()
+                .label(tab.host_label.clone())
                 .prefix(
                     div().size_2().rounded_full().flex_shrink_0()
                         .bg(gpui::rgb(if connected { 0x22c55e } else { 0xeab308 }))
                 )
                 .suffix(
-                    div().id(ElementId::Name(format!("close-tab-{i}").into()))
-                        .cursor_pointer()
-                        .child(Icon::new(IconName::Close).size_3()
-                            .text_color(gpui::rgb(0x7b84a8)))
+                    Button::new(ElementId::Name(format!("close-tab-{i}").into()))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_tab(ti, cx);
+                            this.close_tab(i, cx);
                         }))
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.active_tab = ti;
-                    this.nav = Nav::Terminal;
-                    this.focus_handle.focus(window, cx);
-                    cx.notify();
-                }))
         }))
 }

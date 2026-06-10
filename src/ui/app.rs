@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
+    badge::Badge,
     h_flex,
     input::{Input, InputState},
     form::{field, v_form},
@@ -215,7 +216,7 @@ impl AppState {
             available_keys: vec![],
             known_host_entries: known, log_lines: logs,
             sftp: SftpState::default(),
-            search_input: cx.new(|cx| InputState::new(window, cx).placeholder("Buscar por IP o label...")),
+            search_input: cx.new(|cx| InputState::new(window, cx).placeholder("Search...")),
             focus_handle: cx.focus_handle(),
             terminal_font_size: 13,
             host_view_mode: HostViewMode::Grid,
@@ -768,6 +769,7 @@ impl Render for AppState {
         let collapsed = self.sidebar_collapsed;
         let vok = self.vault_unlocked;
         let ic = collapsed;
+        let tabs_count = self.tabs.len();
 
         // Colores de botones (Hsla: Copy, capturados por valor en closures)
         let btn_fg       = cx.theme().foreground;
@@ -873,31 +875,51 @@ impl Render for AppState {
                             .rounded(cx.theme().radius).bg(cx.theme().sidebar_primary)
                             .text_color(cx.theme().sidebar_primary_foreground)
                             .child(Icon::new(IconName::SquareTerminal)))
-                        .when(!ic, |this| this.child(v_flex().flex_1().overflow_hidden()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("ShellMounter"))
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("SSH Client")))))
-                    .child(SidebarGroup::new("Navigation").child(SidebarMenu::new()
+                        .when(!ic, |this| this
+                            .child(v_flex().flex_1().overflow_hidden()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().truncate().child("ShellMounter"))
+                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("SSH Client")))
+                            .child(Icon::new(IconName::ChevronsUpDown).size_4().flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground))))
+                    .child(SidebarGroup::new("Conexiones").child(SidebarMenu::new()
                         .child(widgets::menuitem("Hosts", IconName::Network, nav == Nav::Hosts, cx, |s, cx| { s.nav = Nav::Hosts; cx.notify(); }))
+                        .child(SidebarMenuItem::new("Terminal")
+                            .icon(IconName::SquareTerminal)
+                            .active(nav == Nav::Terminal)
+                            .when(tabs_count > 0, |this| {
+                                this.suffix(move |_, _| Badge::new().count(tabs_count).child(tabs_count.to_string()))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| { this.nav = Nav::Terminal; cx.notify(); })))
+                        .child(widgets::menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))))
+                    .child(SidebarGroup::new("Herramientas").child(SidebarMenu::new()
                         .child(widgets::menuitem("Keychain", IconName::HardDrive, nav == Nav::Keychain, cx, |s, cx| { s.nav = Nav::Keychain; s.load_keys(); cx.notify(); }))
                         .child(widgets::menuitem("Port Fwd", IconName::Network, nav == Nav::PortForwarding, cx, |s, cx| { s.nav = Nav::PortForwarding; cx.notify(); }))
-                        .child(widgets::menuitem("Snippets", IconName::SquareTerminal, nav == Nav::Snippets, cx, |s, cx| { s.nav = Nav::Snippets; cx.notify(); }))
+                        .child(widgets::menuitem("Snippets", IconName::BookOpen, nav == Nav::Snippets, cx, |s, cx| { s.nav = Nav::Snippets; cx.notify(); }))))
+                    .child(SidebarGroup::new("Sistema").child(SidebarMenu::new()
                         .child(widgets::menuitem("Known Hosts", IconName::Globe, nav == Nav::KnownHosts, cx, |s, cx| { s.nav = Nav::KnownHosts; cx.notify(); }))
                         .child(widgets::menuitem("Logs", IconName::Inbox, nav == Nav::Logs, cx, |s, cx| { s.nav = Nav::Logs; cx.notify(); }))
-                        .child(widgets::menuitem("Settings", IconName::Settings, nav == Nav::Settings, cx, |s, cx| { s.nav = Nav::Settings; cx.notify(); }))
-                        .child(widgets::menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))))
-                    .footer(SidebarFooter::new().child(h_flex().gap_2()
-                        .child(div().size_2().rounded_full().flex_shrink_0()
-                            .bg(if vok { rgb(0x22c55e) } else { rgb(0xef4444) }))
-                        .child(div().id("vault-status").h_7().px_2().rounded(cx.theme().radius)
-                            .flex().items_center().text_xs().cursor_pointer()
-                            .bg(cx.theme().secondary).text_color(cx.theme().muted_foreground)
-                            .hover(|d| d.bg(cx.theme().secondary_hover))
-                            .child(if vok { "Vault abierto" } else { "Vault bloqueado" })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if !this.vault_unlocked { this.modal = Some(Modal::VaultUnlock); }
-                                else { this.vault.lock().lock(); this.vault_unlocked = false; this.modal = Some(Modal::VaultUnlock); }
-                                cx.notify();
-                            }))))))
+                        .child(widgets::menuitem("Settings", IconName::Settings, nav == Nav::Settings, cx, |s, cx| { s.nav = Nav::Settings; cx.notify(); }))))
+                    .footer(SidebarFooter::new()
+                        .justify_between()
+                        .child(h_flex().gap_2().items_center()
+                            .child(div().size_2().rounded_full().flex_shrink_0()
+                                .bg(if vok { rgb(0x22c55e) } else { rgb(0xef4444) }))
+                            .when(!ic, |this| this.child(
+                                div().text_xs().text_color(cx.theme().muted_foreground)
+                                    .child(if vok { "Vault abierto" } else { "Vault bloqueado" })
+                            )))
+                        .when(!ic, |this| this.child(
+                            div().id("vault-toggle")
+                                .flex().items_center().rounded(cx.theme().radius).p_1()
+                                .cursor_pointer().text_color(cx.theme().muted_foreground)
+                                .hover(|d| d.bg(cx.theme().secondary_hover))
+                                .child(Icon::new(IconName::ChevronsUpDown).size_4())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if !this.vault_unlocked { this.modal = Some(Modal::VaultUnlock); }
+                                    else { this.vault.lock().lock(); this.vault_unlocked = false; this.modal = Some(Modal::VaultUnlock); }
+                                    cx.notify();
+                                }))
+                        ))))
                 .child(v_flex().flex_1().h_full().min_w_0()
                     .when(!self.tabs.is_empty(), |d| d.child(terminal::render_tab_bar(self, cx)))
                     .child(render_content(self, cx))

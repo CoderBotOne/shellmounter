@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
-    h_flex, v_flex, scroll::ScrollableElement as _, ActiveTheme, Icon, Sizable, IconName,
+    h_flex, v_flex, scroll::ScrollableElement as _, ActiveTheme, Icon, Sizable, IconName, Selectable,
     input::Input,
     button::{Button, ButtonVariants as _},
 };
@@ -23,11 +23,9 @@ pub fn render_hosts_view(state: &AppState, cx: &mut Context<AppState>) -> impl I
                     this.modal = Some(Modal::HostEditor); cx.notify();
                 })))
             .child(
-                h_flex().flex_1().h_8().px_2().rounded(cx.theme().radius)
-                    .border_1().border_color(cx.theme().border).bg(cx.theme().secondary)
-                    .items_center().gap_1()
-                    .child(Icon::new(IconName::Search).size_4().text_color(cx.theme().muted_foreground))
-                    .child(div().flex_1().child(Input::new(&state.search_input)))
+                Input::new(&state.search_input)
+                    .prefix(Icon::new(IconName::Search).small())
+                    .flex_1()
             )
             .child(div().flex_1())
             // View mode toggles
@@ -44,20 +42,18 @@ fn render_view_toggle(state: &AppState, cx: &mut Context<AppState>) -> impl Into
     let mode = state.host_view_mode;
     h_flex().gap_1().pr_2()
         .child(
-            Button::new("view-grid")
-                .when(mode == HostViewMode::Grid, |b| b.primary())
-                .when(mode != HostViewMode::Grid, |b| b.ghost())
-                .child(Icon::new(IconName::LayoutDashboard).size_4())
+            Button::new("view-grid").ghost()
+                .icon(IconName::LayoutDashboard)
+                .selected(mode == HostViewMode::Grid)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.host_view_mode = HostViewMode::Grid;
                     cx.notify();
                 }))
         )
         .child(
-            Button::new("view-list")
-                .when(mode == HostViewMode::List, |b| b.primary())
-                .when(mode != HostViewMode::List, |b| b.ghost())
-                .child(Icon::new(IconName::Menu).size_4())
+            Button::new("view-list").ghost()
+                .icon(IconName::GalleryVerticalEnd)
+                .selected(mode == HostViewMode::List)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.host_view_mode = HostViewMode::List;
                     cx.notify();

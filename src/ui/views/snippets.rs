@@ -17,6 +17,7 @@ pub fn render_snippets_view(state: &AppState, cx: &mut Context<AppState>) -> imp
     v_flex().flex_1().size_full()
         // ── Header ──
         .child(h_flex().h_12().px_4().gap_2().border_b_1().border_color(cx.theme().border)
+            .child(Icon::new(IconName::Copy).small().text_color(cx.theme().muted_foreground))
             .child(div().font_weight(FontWeight::SEMIBOLD).text_sm().child("Snippets"))
             .child(div().flex_1())
             .child(div().text_xs().text_color(cx.theme().muted_foreground)
