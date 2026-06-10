@@ -187,9 +187,9 @@ impl AppState {
                                 if !p.is_alive() { break; }
                                 drop(p);
                                 // Yield before polling again (50ms).
-                                // Not using tokio::time::sleep because GPUI's
-                                // executor isn't always a Tokio runtime.
-                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                // Use smol::Timer which works on any async executor,
+                                // not just Tokio (GPUI doesn't run on Tokio).
+                                smol::Timer::after(std::time::Duration::from_millis(50)).await;
                                 continue;
                             }
                             Ok(n) => n,
