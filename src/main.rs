@@ -13,6 +13,7 @@
 mod db;
 mod platform;
 mod ssh;
+mod git;
 #[cfg(feature = "alacritty_terminal")]
 mod terminal;
 mod update;
