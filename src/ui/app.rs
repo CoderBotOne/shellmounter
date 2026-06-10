@@ -269,6 +269,12 @@ impl Render for AppState {
 
         v_flex().size_full().bg(cx.theme().background)
             .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                if event.keystroke.modifiers.control && event.keystroke.key == "k" {
+                    this.palette_visible = !this.palette_visible;
+                    cx.notify();
+                }
+            }))
             .map(|this| match decorations {
                 Decorations::Client { tiling } => this
                     .when(!(tiling.top || tiling.left),    |d| d.rounded_tl(px(10.)))
@@ -378,6 +384,7 @@ impl Render for AppState {
                     .when(!self.tabs.is_empty(), |d| d.child(terminal::render_tab_bar(self, cx)))
                     .child(render_content(self, cx))
                     .child(status_bar::render_status_bar(self, cx))))
+            .when(self.palette_visible, |d| d.child(render_palette(self, cx)))
     }
 }
 
@@ -430,6 +437,74 @@ impl gpui::Focusable for AppState {
     fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Command Palette
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn render_palette(state: &mut AppState, cx: &mut Context<AppState>) -> AnyElement {
+    let theme = cx.theme().clone();
+    let commands: &[(&str, &str)] = &[
+        ("New Terminal", "Ctrl+T"),
+        ("AI Chat", "Switch to AI"),
+        ("Git Panel", "Source control"),
+        ("Kanban Board", "Task manager"),
+        ("DevTools", "NVM & scripts"),
+        ("Explain Terminal", "AI analyze output"),
+        ("Close Palette", "Escape"),
+    ];
+
+    let filtered: Vec<(&str, &str)> = if state.palette_query.is_empty() {
+        commands.iter().copied().collect()
+    } else {
+        let q = state.palette_query.to_lowercase();
+        commands.iter().filter(|(name, _)| name.to_lowercase().contains(&q)).copied().collect()
+    };
+
+    div().absolute().inset_0().flex().items_center().justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.5))
+        .id("palette-overlay")
+        .on_click(cx.listener(|this, _, _, cx| { this.palette_visible = false; cx.notify(); }))
+        .child(
+            v_flex().w(px(500.)).max_h(px(400.)).rounded_lg().bg(theme.background).border_1().border_color(theme.border).shadow_lg()
+                .child(
+                    div().px_4().py_2().border_b_1().border_color(theme.border)
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child("Command Palette")))
+                .child(
+                    div().flex_1().overflow_y_scrollbar().p_2().child(
+                        v_flex().gap_0().children(filtered.iter().enumerate().map(|(i, &(name, desc))| {
+                            let item_id = format!("palette-item-{i}");
+                            h_flex().px_3().py_1p5().gap_3().items_center().rounded_md()
+                                .hover(|s| s.bg(theme.primary))
+                                .cursor_pointer()
+                                .id(ElementId::Name(item_id.clone().into()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    match name {
+                                        "New Terminal" => { this.new_terminal_tab(cx); }
+                                        "AI Chat" => { this.nav = Nav::Termia; }
+                                        "Git Panel" => { this.nav = Nav::Git; }
+                                        "Kanban Board" => { this.nav = Nav::Kanban; }
+                                        "DevTools" => { this.nav = Nav::DevTools; }
+                                        "Explain Terminal" => {
+                                            let text = "Explain this terminal output".to_string();
+                                            this.send_ai_message(text, cx);
+                                            this.nav = Nav::Termia;
+                                        }
+                                        "Close Palette" => {}
+                                        _ => {}
+                                    }
+                                    this.palette_visible = false;
+                                    this.palette_query.clear();
+                                    cx.notify();
+                                }))
+                                .child(div().text_sm().text_color(theme.foreground).child(name.to_string()))
+                                .child(div().flex_1())
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(desc.to_string()))
+                                .into_any_element()
+                        }))
+                    ))
+        ).into_any_element()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
