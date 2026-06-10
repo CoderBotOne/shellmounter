@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(unused)]
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{badge::Badge, button::{Button, ButtonVariants as _}, h_flex, v_flex, ActiveTheme};
@@ -17,14 +17,14 @@ pub fn render_devtools_view(state: &AppState, cx: &mut Context<AppState>) -> imp
         )
         .child(
             div().flex_1().overflow_y_scrollbar().p_4().child(v_flex().gap_4()
-                .child(render_nvm_section(&nvm, &theme))
-                .child(render_scripts_section(&scripts, &theme))
+                .child(render_nvm_section(&nvm, &theme, cx))
+                .child(render_scripts_section(&scripts, &theme, cx))
             )
         )
         .into_any_element()
 }
 
-fn render_nvm_section(state: &devtools::NvmState, theme: &gpui_component::Theme) -> impl IntoElement {
+fn render_nvm_section(state: &devtools::NvmState, theme: &gpui_component::Theme, cx: &mut Context<AppState>) -> impl IntoElement {
     v_flex().gap_2()
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child("Node Version Manager"))
         .child(
@@ -34,49 +34,67 @@ fn render_nvm_section(state: &devtools::NvmState, theme: &gpui_component::Theme)
                     items.push(h_flex().gap_2().child(Badge::new().child("current")).child(div().text_sm().text_color(theme.foreground).child(cur.clone())).into_any_element());
                 }
                 for v in &state.installed {
+                    let ver = v.clone();
                     items.push(h_flex().gap_2()
                         .child(div().text_sm().text_color(theme.muted_foreground).child(v.clone()))
-                        .child(Button::new(format!("nvm-{}", v)).ghost().child("Use"))
+                        .child(
+                            Button::new(format!("nvm-{}", v)).ghost().child("Use")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    match devtools::nvm_use(&ver) {
+                                        Ok(out) => { this.status_message = format!("NVM: {}", out); }
+                                        Err(e) => { this.status_message = format!("NVM error: {e}"); }
+                                    }
+                                    cx.notify();
+                                })))
                         .into_any_element());
                 }
                 items
             } else {
-                vec![div().text_sm().text_color(theme.muted_foreground).child("NVM not detected. Install from https://github.com/nvm-sh/nvm").into_any_element()]
+                vec![div().text_sm().text_color(theme.muted_foreground).child("NVM not detected").into_any_element()]
             })
         )
 }
 
-fn render_scripts_section(scripts: &[devtools::ScriptDef], theme: &gpui_component::Theme) -> impl IntoElement {
+fn render_scripts_section(scripts: &[devtools::ScriptDef], theme: &gpui_component::Theme, cx: &mut Context<AppState>) -> impl IntoElement {
     let pkg = scripts.iter().filter(|s| s.source == devtools::ScriptSource::PackageJson).collect::<Vec<_>>();
     let make = scripts.iter().filter(|s| s.source == devtools::ScriptSource::Makefile).collect::<Vec<_>>();
     let cargo = scripts.iter().filter(|s| s.source == devtools::ScriptSource::CargoToml).collect::<Vec<_>>();
 
     v_flex().gap_3()
         .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child("Script Runner"))
-        .child(script_group("package.json", &pkg, theme))
-        .child(script_group("Makefile", &make, theme))
-        .child(script_group("Cargo.toml", &cargo, theme))
+        .child(script_group("package.json", &pkg, theme, cx))
+        .child(script_group("Makefile", &make, theme, cx))
+        .child(script_group("Cargo.toml", &cargo, theme, cx))
 }
 
-fn script_group(title: &str, scripts: &[&devtools::ScriptDef], theme: &gpui_component::Theme) -> AnyElement {
+fn script_group(title: &str, scripts: &[&devtools::ScriptDef], theme: &gpui_component::Theme, cx: &mut Context<AppState>) -> AnyElement {
     if scripts.is_empty() { return div().into_any_element(); }
     v_flex().gap_1()
         .child(div().text_xs().text_color(theme.muted_foreground).child(SharedString::from(title)))
         .child(v_flex().gap_0p5().children(scripts.iter().map(|s| {
+            let cmd = s.command.clone();
+            let name = s.name.clone();
             h_flex().px_2().py_1().gap_2().items_center().rounded_md().hover(|st| st.bg(theme.primary))
-                .child(Badge::new().child("▶"))
+                .child(Badge::new().child("\u{25b6}"))
                 .child(div().text_sm().text_color(theme.foreground).child(s.name.clone()))
                 .child(div().flex_1())
                 .child(div().text_xs().text_color(theme.muted_foreground).child(s.command.clone()))
-                .child(Button::new(format!("run-{}", s.name)).ghost().child("Run"))
+                .child(
+                    Button::new(format!("run-{}", s.name)).ghost().child("Run")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let dir = this.data_dir.clone();
+                            match devtools::run_script(&dir, &cmd) {
+                                Ok(out) => { this.status_message = format!("{}: {}", name, out.trim()); }
+                                Err(e) => { this.status_message = format!("{} error: {e}", name); }
+                            }
+                            cx.notify();
+                        })))
                 .into_any_element()
         })))
         .into_any_element()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Diff viewer
-// ═══════════════════════════════════════════════════════════════════════════
+// Public API for other views to use
 
 pub fn render_diff_view(old_text: &str, new_text: &str, theme: &gpui_component::Theme) -> impl IntoElement {
     let lines = diff_lines(old_text, new_text);
@@ -102,20 +120,13 @@ impl DiffKind {
 }
 
 fn diff_lines(old: &str, new: &str) -> Vec<(DiffKind, String)> {
-    // Simple line-by-line diff
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut result = Vec::new();
-
-    // Very simple: show all old lines as removed, all new as added
     for l in &old_lines { result.push((DiffKind::Remove, l.to_string())); }
     for l in &new_lines { result.push((DiffKind::Add, l.to_string())); }
     result
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Markdown preview
-// ═══════════════════════════════════════════════════════════════════════════
 
 pub fn render_markdown_preview(content: &str, _cx: &mut Context<AppState>) -> impl IntoElement {
     let theme = _cx.theme().clone();
@@ -132,19 +143,14 @@ pub fn render_markdown_preview(content: &str, _cx: &mut Context<AppState>) -> im
                 let t: SharedString = line.trim_start_matches("### ").into();
                 div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(t).into_any_element()
             } else if line.starts_with("```") {
-                let s: SharedString = line.clone().into();
-                div().text_xs().text_color(theme.muted_foreground).child(s).into_any_element()
+                div().text_xs().text_color(theme.muted_foreground).child(line.clone()).into_any_element()
             } else if line.starts_with("- ") || line.starts_with("* ") {
-                let t: SharedString = format!("  • {}", &line[2..]).into();
+                let t: SharedString = format!("  \u{2022} {}", &line[2..]).into();
                 div().text_sm().text_color(theme.foreground).child(t).into_any_element()
-            } else if line.starts_with("> ") {
-                let t: SharedString = line[2..].to_string().into();
-                div().text_sm().text_color(theme.muted_foreground).border_l_2().border_color(theme.primary).pl_2().child(t).into_any_element()
             } else if line.is_empty() {
                 div().h_2().into_any_element()
             } else {
-                let t: SharedString = line.clone().into();
-                div().text_sm().text_color(theme.foreground).child(t).into_any_element()
+                div().text_sm().text_color(theme.foreground).child(line.clone()).into_any_element()
             }
         })))
         .into_any_element()

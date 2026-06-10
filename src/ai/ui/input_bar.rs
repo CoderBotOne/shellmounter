@@ -2,50 +2,43 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{
-    badge::Badge,
     button::{Button, ButtonVariants as _},
     tab::{TabBar, Tab},
     h_flex, v_flex, ActiveTheme,
 };
 
+use crate::ui::app::AppState;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InputMode { Shell, Ai }
 
-/// Render the Shell/AI input bar.
+/// Render the AI input bar with Send button.
 pub fn render_input_bar(
-    mode: InputMode,
-    input_text: String,
-    on_send: impl Fn(String, &mut Window, &mut App) + 'static,
-    cx: &mut Context<crate::ui::app::AppState>,
+    _mode: InputMode,
+    has_api_key: bool,
+    cx: &mut Context<AppState>,
 ) -> impl IntoElement {
     let theme = cx.theme().clone();
-    let text_for_send = input_text.clone();
-    let display = if input_text.is_empty() { "Ask Termia...".to_string() } else { input_text };
 
-    if mode == InputMode::Shell {
-        let green = hsla(142.0, 0.71, 0.45, 1.0);
-        v_flex().border_t_1().border_color(theme.border).bg(theme.background).px_3().py_2()
-            .child(h_flex().gap_1().px_1()
-                .child(Badge::new().child("~/proyectos/termia"))
-                .child(Badge::new().child("main")))
-            .child(h_flex().gap_2().items_end().mt_1()
-                .child(div().flex_1().px_3().py_1().rounded_lg().bg(hsla(0.0,0.0,0.0,1.0))
-                    .child(div().text_sm().text_color(green).child("$ ")))
-                .child(mode_tabs(mode)))
-            .into_any_element()
-    } else {
-        v_flex().border_t_1().border_color(theme.border).bg(theme.background).px_3().py_2()
-            .child(h_flex().gap_1().px_1()
-                .child(Badge::new().child("~/proyectos/termia"))
-                .child(Badge::new().child("main")))
-            .child(h_flex().gap_2().items_center().mt_1()
-                .child(div().flex_1().px_3().py_1().rounded_lg().bg(hsla(0.0,0.0,0.0,1.0))
-                    .child(div().text_sm().text_color(hsla(0.0,0.0,0.42,1.0)).child(display)))
-                .child(Button::new("send-ai").primary().child("Send")
-                    .on_click(move |_, w, cx| { on_send(text_for_send.clone(), w, cx); }))
-                .child(mode_tabs(mode)))
-            .into_any_element()
-    }
+    v_flex()
+        .border_t_1().border_color(theme.border).bg(theme.background).px_3().py_2()
+        .child(
+            h_flex().gap_1().px_1()
+                .child(div().text_xs().text_color(theme.muted_foreground).child("AI Chat"))
+                .child(
+                    div().text_xs().text_color(if has_api_key { rgb(0x22c55e) } else { rgb(0xef4444) })
+                        .child(if has_api_key { "ready" } else { "no API key" })))
+        .child(
+            h_flex().gap_2().items_center().mt_1()
+                .child(div().flex_1())
+                .child(
+                    Button::new("send-ai").primary().child("Send")
+                        .on_click(cx.listener(|this: &mut AppState, _, _w: &mut Window, cx| {
+                            let text = "Explain this project".to_string();
+                            this.send_ai_message(text, cx);
+                            cx.notify();
+                        })))
+                .child(mode_tabs(_mode)))
 }
 
 fn mode_tabs(_mode: InputMode) -> impl IntoElement {

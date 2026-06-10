@@ -59,6 +59,12 @@ pub(crate) struct AppState {
     pub(crate) ai_mini_visible: bool,
     pub(crate) ai_api_key: String,
     pub(crate) ai_model: String,
+    /// AI input entity for the chat input bar.
+    pub(crate) ai_input: Entity<InputState>,
+    /// Command palette visibility (Ctrl+K).
+    pub(crate) palette_visible: bool,
+    /// Palette search text.
+    pub(crate) palette_query: String,
 }
 
 #[derive(Clone)]
@@ -87,6 +93,7 @@ impl TabState {
 
 impl AppState {
     pub fn new(data_dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ai_input = cx.new(|cx| InputState::new(window, cx).placeholder("Ask Termia..."));
         let mut s = Self {
             data_dir,
             nav: Nav::Terminal,
@@ -101,6 +108,9 @@ impl AppState {
             ai_mini_visible: false,
             ai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             ai_model: std::env::var("TERMIA_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
+            ai_input,
+            palette_visible: false,
+            palette_query: String::new(),
         };
         // Abrir una pestaña de terminal local al iniciar
         s.new_terminal_tab(cx);
@@ -388,9 +398,10 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
 
 fn render_termia_view(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     let theme = cx.theme().clone();
+    let has_key = !state.ai_api_key.is_empty();
     v_flex().size_full().bg(theme.background)
         .child(render_chat_view(&state.chat_state, cx))
-        .child(render_input_bar(InputMode::Ai, "".to_string(), |_, _, _| {}, cx))
+        .child(render_input_bar(InputMode::Ai, has_key, cx))
         .into_any_element()
 }
 
