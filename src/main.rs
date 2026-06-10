@@ -20,6 +20,7 @@ mod update;
 mod vault;
 mod fs;
 mod webview;
+mod kanban;
 
 // AI module — Termia: terminal + IA integration
 #[cfg(feature = "gui")]

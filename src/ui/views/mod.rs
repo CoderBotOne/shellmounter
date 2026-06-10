@@ -11,3 +11,4 @@ pub mod status_bar;
 pub mod sftp;
 pub mod modal;
 pub mod git;
+pub mod kanban;

@@ -49,7 +49,7 @@ pub(crate) enum HostViewMode { List, #[default] Grid }
 pub(crate) enum Nav {
     #[default] Hosts,
     Terminal, Keychain, PortForwarding, Snippets, KnownHosts, Logs, Settings, Sftp,
-    Termia, Git,
+    Termia, Git, Kanban,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1037,7 +1037,8 @@ impl Render for AppState {
                         .child(widgets::menuitem("Settings", IconName::Settings, nav == Nav::Settings, cx, |s, cx| { s.nav = Nav::Settings; cx.notify(); }))
                         .child(widgets::menuitem("SFTP", IconName::HardDrive, nav == Nav::Sftp, cx, |s, cx| { s.nav = Nav::Sftp; s.load_local_files(); cx.notify(); }))
                         .child(widgets::menuitem("Termia", IconName::Search, nav == Nav::Termia, cx, |s, cx| { s.nav = Nav::Termia; cx.notify(); }))
-                        .child(widgets::menuitem("Git", IconName::Globe, nav == Nav::Git, cx, |s, cx| { s.nav = Nav::Git; cx.notify(); }))))
+                        .child(widgets::menuitem("Git", IconName::Globe, nav == Nav::Git, cx, |s, cx| { s.nav = Nav::Git; cx.notify(); }))
+                        .child(widgets::menuitem("Kanban", IconName::LayoutDashboard, nav == Nav::Kanban, cx, |s, cx| { s.nav = Nav::Kanban; cx.notify(); }))))
                     .footer(SidebarFooter::new().child(h_flex().gap_2()
                         .child(div().size_2().rounded_full().flex_shrink_0()
                             .bg(if vok { rgb(0x22c55e) } else { rgb(0xef4444) }))
@@ -1081,6 +1082,7 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
         Nav::Sftp => sftp::render_sftp_view(state, cx).into_any_element(),
         Nav::Termia => render_termia_view(state, cx),
         Nav::Git => git::render_git_view(state, cx).into_any_element(),
+        Nav::Kanban => kanban::render_kanban_view(state, cx).into_any_element(),
     }
 }
 
