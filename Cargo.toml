@@ -49,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 shellexpand = "3"
 futures = "0.3"
+toml = "0.8"
 
 # GUI (optional) — gpui + gpui-component from git
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
