@@ -59,6 +59,8 @@ pub(crate) struct AppState {
     pub(crate) ai_mini_visible: bool,
     pub(crate) ai_api_key: String,
     pub(crate) ai_model: String,
+    /// Selected agent index (0=OpenAI, 1=Anthropic, 2=Ollama).
+    pub(crate) agent_index: usize,
     /// AI input entity for the chat input bar.
     pub(crate) ai_input: Entity<InputState>,
     /// AI input text (accumulated keystrokes).
@@ -112,6 +114,7 @@ impl AppState {
             ai_mini_visible: false,
             ai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             ai_model: std::env::var("TERMIA_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
+            agent_index: 0,
             ai_input,
             ai_text: String::new(),
             input_mode: InputMode::Ai,
@@ -450,7 +453,31 @@ fn render_termia_view(state: &AppState, cx: &mut Context<AppState>) -> AnyElemen
     let theme = cx.theme().clone();
     let has_key = !state.ai_api_key.is_empty();
     let mode = state.input_mode;
+    let agents = ["GPT-4o", "Claude", "Ollama"];
+    let agent_idx = state.agent_index;
     v_flex().size_full().bg(theme.background)
+        .child(
+            h_flex().px_4().py_1().gap_1().border_b_1().border_color(theme.border)
+                .child(div().text_xs().text_color(theme.muted_foreground).child("Model:"))
+                .children(agents.iter().enumerate().map(|(i, name)| {
+                    h_flex().px_2().py_1().rounded_sm()
+                        .cursor_pointer()
+                        .bg(if i == agent_idx { theme.primary } else { hsla(0.0, 0.0, 0.0, 0.0) })
+                        .text_color(if i == agent_idx { theme.primary_foreground } else { theme.muted_foreground })
+                        .text_xs()
+                        .id(ElementId::Name(format!("agent-{i}").into()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.agent_index = i;
+                            match i {
+                                0 => this.ai_model = "gpt-4o".into(),
+                                1 => this.ai_model = "claude-sonnet-4".into(),
+                                _ => this.ai_model = "llama3".into(),
+                            }
+                            cx.notify();
+                        }))
+                        .child(*name)
+                        .into_any_element()
+                })))
         .child(render_chat_view(&state.chat_state, cx))
         .child(render_input_bar(mode, has_key, SharedString::from(state.ai_text.as_str()), cx))
         .into_any_element()
