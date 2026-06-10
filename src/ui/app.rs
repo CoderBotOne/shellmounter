@@ -61,6 +61,10 @@ pub(crate) struct AppState {
     pub(crate) ai_model: String,
     /// AI input entity for the chat input bar.
     pub(crate) ai_input: Entity<InputState>,
+    /// AI input text (accumulated keystrokes).
+    pub(crate) ai_text: String,
+    /// Current input mode: Shell or AI.
+    pub(crate) input_mode: InputMode,
     /// Command palette visibility (Ctrl+K).
     pub(crate) palette_visible: bool,
     /// Palette search text.
@@ -109,6 +113,8 @@ impl AppState {
             ai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             ai_model: std::env::var("TERMIA_MODEL").unwrap_or_else(|_| "gpt-4o".into()),
             ai_input,
+            ai_text: String::new(),
+            input_mode: InputMode::Ai,
             palette_visible: false,
             palette_query: String::new(),
         };
@@ -270,9 +276,46 @@ impl Render for AppState {
         v_flex().size_full().bg(cx.theme().background)
             .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
-                if event.keystroke.modifiers.control && event.keystroke.key == "k" {
-                    this.palette_visible = !this.palette_visible;
-                    cx.notify();
+                let key = event.keystroke.key.as_str();
+                let ctrl = event.keystroke.modifiers.control;
+                
+                if ctrl {
+                    match key {
+                        "k" => { this.palette_visible = !this.palette_visible; cx.notify(); }
+                        "t" => { this.new_terminal_tab(cx); }
+                        "w" => { if !this.tabs.is_empty() { this.close_tab(this.active_tab, cx); } }
+                        _ => {
+                            // Ctrl+1-9: switch to tab
+                            if let Some(d) = key.chars().next().and_then(|c| c.to_digit(10)) {
+                                if d > 0 && d as usize <= this.tabs.len() {
+                                    this.active_tab = (d - 1) as usize;
+                                    this.nav = Nav::Terminal;
+                                    this.focus_handle.focus(_window, cx);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Capture text input for AI chat when in AI mode
+                if this.nav == Nav::Termia && !ctrl {
+                    if key == "enter" || key == "return" {
+                        let text = std::mem::take(&mut this.ai_text);
+                        if !text.trim().is_empty() {
+                            this.send_ai_message(text, cx);
+                        }
+                        cx.notify();
+                    } else if key == "backspace" {
+                        this.ai_text.pop();
+                        cx.notify();
+                    } else if key == "space" {
+                        this.ai_text.push(' ');
+                        cx.notify();
+                    } else if key.len() == 1 {
+                        this.ai_text.push_str(key);
+                        cx.notify();
+                    }
                 }
             }))
             .map(|this| match decorations {
@@ -406,9 +449,10 @@ fn render_content(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
 fn render_termia_view(state: &AppState, cx: &mut Context<AppState>) -> AnyElement {
     let theme = cx.theme().clone();
     let has_key = !state.ai_api_key.is_empty();
+    let mode = state.input_mode;
     v_flex().size_full().bg(theme.background)
         .child(render_chat_view(&state.chat_state, cx))
-        .child(render_input_bar(InputMode::Ai, has_key, cx))
+        .child(render_input_bar(mode, has_key, SharedString::from(state.ai_text.as_str()), cx))
         .into_any_element()
 }
 
